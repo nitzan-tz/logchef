@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  moveListItem,
   snapPanelWidth,
   panelSeedState,
   takePanelSeed,
@@ -920,5 +921,20 @@ describe("panel seed", () => {
     window.history.replaceState({ ...window.history.state, ...panelSeedState(seed) }, "");
     expect(takePanelSeed()).toEqual(seed);
     expect(takePanelSeed()).toBeNull();
+  });
+});
+
+describe("moveListItem", () => {
+  it("moves an entry forward and backward without mutating the input", () => {
+    const columns = ["a", "b", "c", "d"];
+    expect(moveListItem(columns, 0, 2)).toEqual(["b", "c", "a", "d"]);
+    expect(moveListItem(columns, 3, 1)).toEqual(["a", "d", "b", "c"]);
+    expect(columns).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("returns an unchanged copy for out-of-range or no-op moves", () => {
+    expect(moveListItem(["a", "b"], 0, 0)).toEqual(["a", "b"]);
+    expect(moveListItem(["a", "b"], 1, 2)).toEqual(["a", "b"]);
+    expect(moveListItem(["a", "b"], -1, 0)).toEqual(["a", "b"]);
   });
 });
