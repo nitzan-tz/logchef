@@ -5,12 +5,12 @@ import type { PanelFrame } from "@/utils/panelFrame";
 import { useI18n } from "vue-i18n";
 
 import { computed, ref } from "vue";
-import { X } from "lucide-vue-next";
+import { ChevronLeft, ChevronRight, GripVertical, X } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { DashboardChartMark, DashboardPanelQuery, DashboardViz } from "@/api/dashboards";
-import { panelBuilderKind, trimDashboardGroupBy } from "@/utils/dashboardPanels";
+import { moveListItem, panelBuilderKind, trimDashboardGroupBy } from "@/utils/dashboardPanels";
 
 const { t } = useI18n();
 
@@ -125,6 +125,37 @@ function addColumn() {
 function removeColumn(name: string) {
   setColumns(visibleColumns.value.filter((c) => c !== name));
 }
+
+// The table renders visible_columns in array order, so reordering the chips
+// reorders the panel's columns.
+function moveColumn(from: number, to: number) {
+  setColumns(moveListItem(visibleColumns.value, from, to));
+}
+
+const dragIndex = ref<number | null>(null);
+const dropIndex = ref<number | null>(null);
+
+function onChipDragStart(event: DragEvent, index: number) {
+  dragIndex.value = index;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", visibleColumns.value[index] ?? "");
+  }
+}
+
+function onChipDragOver(index: number) {
+  if (dragIndex.value !== null) dropIndex.value = index;
+}
+
+function onChipDrop(index: number) {
+  if (dragIndex.value !== null) moveColumn(dragIndex.value, index);
+  onChipDragEnd();
+}
+
+function onChipDragEnd() {
+  dragIndex.value = null;
+  dropIndex.value = null;
+}
 </script>
 
 <template>
@@ -223,16 +254,45 @@ function removeColumn(name: string) {
       <Label for="panel-columns">{{ t('ui.columns') }} <span class='text-muted-foreground'>{{ t('ui.optionalAllIfEmpty') }}</span></Label>
       <div class="flex flex-wrap gap-1.5">
         <span
-          v-for="col in visibleColumns"
+          v-for="(col, i) in visibleColumns"
           :key="col"
-          class="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-xs"
+          draggable="true"
+          :title="t('ui.dragToReorderColumn')"
+          class="inline-flex cursor-grab items-center gap-0.5 rounded bg-muted py-0.5 pl-1 pr-2 text-xs"
+          :class="{ 'opacity-50': dragIndex === i, 'ring-1 ring-primary': dropIndex === i && dragIndex !== i }"
+          @dragstart="onChipDragStart($event, i)"
+          @dragover.prevent="onChipDragOver(i)"
+          @drop.prevent="onChipDrop(i)"
+          @dragend="onChipDragEnd"
         >
-          {{ col }}
-          <button type="button" class="text-muted-foreground hover:text-foreground" @click="removeColumn(col)">
+          <GripVertical class="h-3 w-3 text-muted-foreground" aria-hidden="true" />
+          <button
+            v-if="visibleColumns.length > 1"
+            type="button"
+            class="text-muted-foreground hover:text-foreground disabled:opacity-30"
+            :disabled="i === 0"
+            :aria-label="t('dashboardBuilder.moveColumnLeft', { name: col })"
+            @click="moveColumn(i, i - 1)"
+          >
+            <ChevronLeft class="h-3 w-3" />
+          </button>
+          <span class="px-0.5">{{ col }}</span>
+          <button
+            v-if="visibleColumns.length > 1"
+            type="button"
+            class="text-muted-foreground hover:text-foreground disabled:opacity-30"
+            :disabled="i === visibleColumns.length - 1"
+            :aria-label="t('dashboardBuilder.moveColumnRight', { name: col })"
+            @click="moveColumn(i, i + 1)"
+          >
+            <ChevronRight class="h-3 w-3" />
+          </button>
+          <button type="button" class="ml-0.5 text-muted-foreground hover:text-foreground" :aria-label="t('explore.removeColumn')" @click="removeColumn(col)">
             <X class="h-3 w-3" />
           </button>
         </span>
       </div>
+      <p v-if="visibleColumns.length > 1" class="text-xs text-muted-foreground">{{ t('dashboardBuilder.columnOrderHint') }}</p>
       <Input
         id="panel-columns"
         v-model="columnInput"

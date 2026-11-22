@@ -71,6 +71,15 @@ export function withTabLayout(blob: DashboardPanels, tabId: string, layout: Dash
  * strings.TrimSpace does: U+0085 is trimmed and U+FEFF is kept, unlike
  * JavaScript's trim(). Validation and request building both use it.
  */
+/** A copy of items with the entry at from moved to index to; out-of-range moves return an unchanged copy. */
+export function moveListItem<T>(items: readonly T[], from: number, to: number): T[] {
+  const next = [...items];
+  if (from === to || from < 0 || to < 0 || from >= next.length || to >= next.length) return next;
+  const [item] = next.splice(from, 1);
+  next.splice(to, 0, item);
+  return next;
+}
+
 export function trimDashboardGroupBy(value: string | undefined): string {
   return (value ?? "").replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
 }

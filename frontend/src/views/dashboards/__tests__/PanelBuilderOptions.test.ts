@@ -168,3 +168,33 @@ it('prunes result-chart confirmations, retains missing series and clears default
     expect(viz.value).not.toHaveProperty('x_scale');
   } finally { app.unmount(); }
 });
+
+describe("table builder column order", () => {
+  it("moves a column with the arrow buttons and keeps the end buttons disabled", async () => {
+    const changes: DashboardViz[] = [];
+    const host = document.createElement("div");
+    const app = createApp({
+      render: () => h(PanelBuilderOptions, {
+        query: { mode: "result", language: "logsql", text: "*" },
+        viz: { type: "table", visible_columns: ["_time", "level", "_msg"] },
+        fieldSuggestions: [],
+        "onUpdate:viz": (viz) => changes.push(viz),
+      }),
+    });
+    try {
+      app.use(i18n).mount(host);
+      const button = (label: string) => {
+        const el = host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+        if (!el) throw new Error(`${label} button missing`);
+        return el;
+      };
+      expect(button("Move _time left").disabled).toBe(true);
+      expect(button("Move _msg right").disabled).toBe(true);
+      button("Move _msg left").click();
+      await nextTick();
+      expect(changes.at(-1)).toEqual({ type: "table", visible_columns: ["_time", "_msg", "level"] });
+    } finally {
+      app.unmount();
+    }
+  });
+});
