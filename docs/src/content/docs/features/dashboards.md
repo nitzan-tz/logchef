@@ -3,7 +3,7 @@ title: Dashboards
 head:
   - tag: title
     content: "Log Dashboards for ClickHouse, VictoriaLogs and Loki | Logchef"
-description: Build multi-panel Logchef dashboards that group log-query visualizations into a shared grid with one time range and auto-refresh.
+description: "Build Logchef dashboards from log queries on ClickHouse, VictoriaLogs and Loki: time series, stats and tables on one grid with a shared time range."
 ---
 
 A dashboard is a grid of panels, each one a query rendered as a visualization, sharing one
@@ -78,7 +78,7 @@ collection items.
 ### Chart a LogchefQL aggregation
 
 A LogchefQL panel in result mode can chart an
-[aggregation](/guide/aggregations), on ClickHouse and VictoriaLogs sources alike
+[aggregation](/guide/aggregations/), on ClickHouse and VictoriaLogs sources alike
 (Loki sources do not support LogchefQL aggregations):
 
 ```text
@@ -271,7 +271,7 @@ otherwise. Chips in the panel header show what applies.
 | LogsQL | Always |
 | ClickHouse SQL | Only when the text uses `{{__time_filter}}`, or both `{{__from}}` and `{{__to}}` |
 
-A ClickHouse SQL panel without those [time macros](/guide/time-macros) keeps the
+A ClickHouse SQL panel without those [time macros](/guide/time-macros/) keeps the
 window its SQL sets, for example `WHERE date(ts) >= today() - 10`, and shows
 **Fixed window**. To make it follow the time picker, filter with the macro:
 
@@ -444,7 +444,9 @@ request.
 
 `GET /dashboards` returns one summary per dashboard (panel count, panel
 kinds, tab count, revision, `can_edit`, `can_delete` and a corrupt flag) and no panel
-blobs. Read a dashboard's panels with `GET /dashboards/:id`. Every update
+blobs. An OAuth client, such as `logchef auth` or MCP, reads it and
+`GET /dashboards/:id` with `dashboards:read`, and sees what its user sees as a
+team member: an admin's OAuth token gets no admin bypass. Read a dashboard's panels with `GET /dashboards/:id`. Every update
 must carry the `revision` from that read, and the panel blob may be up to
 512 KiB.
 
@@ -461,7 +463,7 @@ alongside your teams, sources, and saved queries.
 
 ## Next steps
 
-- Save the queries behind your panels to a [Collection](/features/collections) so teammates can reuse them
-- Review [Search Syntax](/guide/search-syntax) to write the LogchefQL filters panels use
-- Count and group in a panel with [Aggregations](/guide/aggregations)
-- See [Alerting](/features/alerting) to get notified instead of watching a dashboard
+- Save the queries behind your panels to a [Collection](/features/collections/) so teammates can reuse them
+- Review [Search Syntax](/guide/search-syntax/) to write the LogchefQL filters panels use
+- Count and group in a panel with [Aggregations](/guide/aggregations/)
+- See [Alerting](/features/alerting/) to get notified instead of watching a dashboard

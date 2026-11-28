@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/gofiber/fiber/v3"
 
@@ -14,6 +15,10 @@ import (
 
 type queryErrorLogKey struct{}
 type queryCancellationKey struct{}
+
+// queryErrorKey holds the error that sendQueryError answered, so endQueryRun
+// can give a failed query.run event its reason.
+type queryErrorKey struct{}
 
 var queryErrorLoggedKey queryErrorLogKey
 
@@ -63,12 +68,18 @@ func classifyQueryError(err error, failure, operation string) queryErrorResponse
 	case isUpstreamError:
 		return queryErrorResponse{fiber.StatusBadGateway, upstreamErr.Message, models.ExternalServiceErrorType}
 	default:
+		// The message of any other ClickHouse exception can name a server, so
+		// the response gives only its code.
+		if code, ok := clickhouse.ExceptionCode(err); ok {
+			failure = fmt.Sprintf("%s (ClickHouse error code %d)", failure, code)
+		}
 		return queryErrorResponse{fiber.StatusInternalServerError, failure, models.DatabaseErrorType}
 	}
 }
 
 func (s *Server) sendQueryError(c fiber.Ctx, sourceID models.SourceID, err error, failure, operation string) error {
 	response := classifyQueryError(err, failure, operation)
+	c.Locals(queryErrorKey{}, err)
 	if errors.Is(err, context.Canceled) {
 		c.Locals(queryCancellationKey{}, true)
 	}

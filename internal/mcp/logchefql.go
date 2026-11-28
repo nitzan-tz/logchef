@@ -7,6 +7,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/mr-karan/logchef/internal/core"
+	"github.com/mr-karan/logchef/internal/core/access"
 	"github.com/mr-karan/logchef/internal/datasource"
 	"github.com/mr-karan/logchef/internal/logchefql"
 	"github.com/mr-karan/logchef/pkg/models"
@@ -48,6 +49,7 @@ type TranslateResult struct {
 	Valid                  bool                  `json:"valid" jsonschema:"Whether the LogchefQL expression is valid"`
 	// Aggregation is absent for a query that returns log rows.
 	Aggregation *logchefql.AggregationInfo `json:"aggregation,omitempty" jsonschema:"The result shape and columns when the query aggregates. full_sql and generated_query are then the aggregated query and sql stays the filter"`
+	Warnings    []string                   `json:"warnings,omitempty" jsonschema:"Notes about a query that translates but may not match what it says, such as a JSON number read as text from a String column"`
 }
 
 // logchefQLRun is one executed LogchefQL query and its tracked query ID.
@@ -57,25 +59,18 @@ type logchefQLRun struct {
 	queryID  string
 }
 
-// runLogchefQL authorizes, admits and runs one LogchefQL query.
-func (t *tools) runLogchefQL(ctx context.Context, teamID, sourceID int, req core.LogchefQLQueryRequest) (logchefQLRun, error) {
-	src, err := t.authorizeSource(ctx, teamID, sourceID, models.TokenScopeLogsRead)
-	if err != nil {
-		return logchefQLRun{}, t.storeError("logchefql query failed", err)
-	}
+// runLogchefQL admits and runs one LogchefQL query on an authorized source.
+func (t *tools) runLogchefQL(ctx context.Context, src access.AuthorizedSource, req core.LogchefQLQueryRequest) (logchefQLRun, error) {
 	var run logchefQLRun
-	err = t.admit(ctx, QueryClassPreview, src, req.Query, func(ctx context.Context, queryID string) error {
+	err := t.admit(ctx, QueryClassPreview, src, req.Query, func(ctx context.Context, queryID string) error {
 		prepared, result, err := core.RunLogchefQL(ctx, t.deps.Datasources, t.deps.Config.Query, src, req)
 		run = logchefQLRun{prepared: prepared, result: result, queryID: queryID}
 		return err
 	})
-	if err != nil {
-		return logchefQLRun{}, t.queryError("logchefql query failed", err)
-	}
-	return run, nil
+	return run, err
 }
 
-func (t *tools) handleQueryLogchefQL(ctx context.Context, _ mcp.CallToolRequest, params QueryLogchefQLParams) (*mcp.CallToolResult, error) {
+func (t *tools) handleQueryLogchefQL(ctx context.Context, req mcp.CallToolRequest, params QueryLogchefQLParams) (*mcp.CallToolResult, error) {
 	limit := params.Limit
 	if limit <= 0 {
 		limit = 100
@@ -88,7 +83,14 @@ func (t *tools) handleQueryLogchefQL(ctx context.Context, _ mcp.CallToolRequest,
 		timezone = "UTC"
 	}
 
-	run, err := t.runLogchefQL(ctx, params.TeamID, params.SourceID, core.LogchefQLQueryRequest{
+	src, err := t.authorizeSource(ctx, params.TeamID, params.SourceID, models.TokenScopeLogsRead)
+	if err != nil {
+		return t.errorResult(t.storeError("logchefql query failed", err)), nil
+	}
+	read := t.startRead(ctx, req, ReadCall{Source: src, Query: params.Query, Language: models.QueryLanguageLogchefQL, Limit: limit})
+	defer func() { read.end(recover()) }()
+	read.From, read.To = logchefQLWindow(params.StartTime, params.EndTime, timezone)
+	run, err := t.runLogchefQL(ctx, src, core.LogchefQLQueryRequest{
 		Query:        params.Query,
 		Limit:        limit,
 		StartTime:    params.StartTime,
@@ -101,8 +103,10 @@ func (t *tools) handleQueryLogchefQL(ctx context.Context, _ mcp.CallToolRequest,
 		AllowAggregation: true,
 	})
 	if err != nil {
-		return t.errorResult(err), nil
+		read.Err = err
+		return t.errorResult(t.queryError("logchefql query failed", err)), nil
 	}
+	read.Rows = int64(len(run.result.Logs))
 
 	compiled := run.prepared.Compiled
 	return mcp.NewToolResultStructuredOnly(QueryResult{
@@ -151,6 +155,7 @@ func (t *tools) handleTranslateLogchefQL(ctx context.Context, _ mcp.CallToolRequ
 		Error:                  translation.Error,
 		Valid:                  translation.Valid,
 		Aggregation:            translation.Aggregation,
+		Warnings:               translation.Warnings,
 	}, nil
 }
 
@@ -189,7 +194,7 @@ func (t *tools) addLogchefQLTools(s *server.MCPServer) {
 	s.AddTool(queryTool, mcp.NewTypedToolHandler(t.handleQueryLogchefQL))
 
 	translateTool := mcp.NewTool("translate_logchefql",
-		mcp.WithDescription("Translate LogchefQL to the source native query language without executing it. sql contains ClickHouse filter conditions. For get_log_histogram, translate the filter without an aggregation pipe and pass its full_sql (ClickHouse) or generated_query (VictoriaLogs); the full_sql of an aggregated query is not a histogram query."),
+		mcp.WithDescription("Translate LogchefQL to the source native query language without executing it. warnings lists queries that translate but may not match what they say. sql contains ClickHouse filter conditions. For get_log_histogram, translate the filter without an aggregation pipe and pass its full_sql (ClickHouse) or generated_query (VictoriaLogs); the full_sql of an aggregated query is not a histogram query."),
 		mcp.WithInputSchema[TranslateLogchefQLParams](),
 		mcp.WithOutputSchema[TranslateResult](),
 		mcp.WithTitleAnnotation("Translate LogchefQL to SQL"),
@@ -198,7 +203,7 @@ func (t *tools) addLogchefQLTools(s *server.MCPServer) {
 	s.AddTool(translateTool, mcp.NewStructuredToolHandler(t.handleTranslateLogchefQL))
 
 	validateTool := mcp.NewTool("validate_logchefql",
-		mcp.WithDescription("Validate a LogchefQL expression for syntax errors without executing it. Returns whether the expression is valid and any error details. Use this before executing queries to catch syntax issues early."),
+		mcp.WithDescription("Validate a LogchefQL expression for syntax errors without executing it. Returns whether the expression is valid and any error details. Use this before executing queries to catch syntax issues early. It does not read the source's column types: translate_logchefql does, and its warnings name a query that translates but may not match, such as a JSON number read as text from a String column."),
 		mcp.WithInputSchema[ValidateLogchefQLParams](),
 		mcp.WithOutputSchema[ValidateResult](),
 		mcp.WithTitleAnnotation("Validate LogchefQL"),

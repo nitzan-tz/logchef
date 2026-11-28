@@ -8,15 +8,19 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/gofiber/fiber/v3"
 
 	"github.com/mr-karan/logchef/internal/cache"
+	"github.com/mr-karan/logchef/internal/clickhouse"
 	"github.com/mr-karan/logchef/internal/config"
 	"github.com/mr-karan/logchef/internal/core"
 	"github.com/mr-karan/logchef/internal/datasource"
@@ -86,7 +90,7 @@ func newAggregationTestServer(t *testing.T, provider datasource.Provider, source
 	s.config.DashboardCache.MaxConcurrentFills = 1
 	s.dashCache = cache.New(cache.Config{Enabled: true, MaxEntryBytes: 4096, MaxBytes: 16384})
 	t.Cleanup(s.dashCache.Close)
-	s.historyQueue = make(chan *models.QueryHistory, 16)
+	s.queryRecords = make(chan queryRecord, 16)
 	s.datasources = datasource.NewService(s.store, s.log)
 	s.datasources.Register(provider)
 	source := &models.Source{Name: "aggregation-" + string(sourceType), SourceType: sourceType, MetaTSField: "_time"}
@@ -191,6 +195,10 @@ func TestLogchefQLAggregationPaths(t *testing.T) {
 	var gotQuery string
 	vl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.FormValue("query")
+		if r.URL.Path == "/select/logsql/field_values" {
+			_, _ = io.WriteString(w, `{"values":[{"value":"api","hits":3}]}`)
+			return
+		}
 		// VictoriaLogs leaves out a key whose value is empty.
 		_, _ = io.WriteString(w, "{\"__lc_v0\":\"3\",\"service\":\"api\"}\n{\"__lc_v0\":\"1\"}\n")
 	}))
@@ -205,6 +213,13 @@ func TestLogchefQLAggregationPaths(t *testing.T) {
 	withAuthorizedSource(app, s, "/teams/:teamID/sources/:sourceID/logchefql/query", user, s.handleLogchefQLQuery)
 	withAuthorizedSource(app, s, "/teams/:teamID/sources/:sourceID/logchefql/translate", user, s.handleLogchefQLTranslate)
 	withAuthorizedSource(app, s, "/teams/:teamID/sources/:sourceID/logs/windowed", user, s.handleWindowedQuery)
+	asUser := func(c fiber.Ctx) error {
+		c.Locals("user", user)
+		c.Locals("auth_method", "session")
+		return c.Next()
+	}
+	app.Get("/teams/:teamID/sources/:sourceID/fields/values", asUser, s.requireTeamHasSource(models.TokenScopeLogsRead), s.handleGetAllFieldValues)
+	app.Get("/teams/:teamID/sources/:sourceID/fields/:fieldName/values", asUser, s.requireTeamHasSource(models.TokenScopeLogsRead), s.handleGetFieldValues)
 	app.Post("/validate", s.handleLogchefQLValidate)
 	timeRange := `"start_time":"2026-09-01T00:00:00Z","end_time":"2026-09-01T01:00:00Z","timezone":"UTC"`
 
@@ -282,6 +297,44 @@ func TestLogchefQLAggregationPaths(t *testing.T) {
 		}
 	})
 
+	// The field sidebar stays open on an aggregated query, so its values
+	// come from the filter in front of the pipe.
+	fieldValues := func(t *testing.T, path, query string) (int, map[string]any) {
+		t.Helper()
+		gotQuery = ""
+		params := url.Values{"type": {"String"}, "start_time": {"2026-09-01T00:00:00Z"}, "end_time": {"2026-09-01T01:00:00Z"}, "query_language": {"logchefql"}, "query": {query}}
+		resp, err := app.Test(httptest.NewRequest(http.MethodGet, base+path+"?"+params.Encode(), http.NoBody))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var body map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, body
+	}
+	for _, path := range []string{"/fields/service/values", "/fields/values"} {
+		t.Run("field values "+path+" use the filter of an aggregation", func(t *testing.T) {
+			status, body := fieldValues(t, path, "x=1 | count() by service")
+			if status != http.StatusOK || !strings.HasPrefix(gotQuery, "x:=1") || strings.Contains(gotQuery, "stats") {
+				t.Fatalf("status=%d body=%v VictoriaLogs query=%q, want 200 over the filter", status, body, gotQuery)
+			}
+		})
+	}
+	t.Run("field values of a bare aggregation read every log", func(t *testing.T) {
+		status, body := fieldValues(t, "/fields/service/values", "| count() by service")
+		if status != http.StatusOK || gotQuery != "*" {
+			t.Fatalf("status=%d body=%v VictoriaLogs query=%q, want 200 over *", status, body, gotQuery)
+		}
+	})
+	t.Run("field values refuse a malformed filter as a bad request", func(t *testing.T) {
+		status, body := fieldValues(t, "/fields/service/values", "x=")
+		if status != http.StatusBadRequest || gotQuery != "" {
+			t.Fatalf("status=%d body=%v VictoriaLogs query=%q, want 400 and no backend request", status, body, gotQuery)
+		}
+	})
+
 	t.Run("windowed search denies", func(t *testing.T) {
 		status, _, body := postJSON(t, app, base+"/logs/windowed", `{"query_language":"logchefql","query_text":"x=1 | count()",`+timeRange+`}`)
 		if status != http.StatusBadRequest || body["message"] != aggregationDenyMessage {
@@ -312,6 +365,100 @@ func TestLogchefQLAggregationPaths(t *testing.T) {
 		}
 		if resp.StatusCode != http.StatusBadRequest || body["message"] != aggregationDenyMessage {
 			t.Fatalf("status=%d body=%v", resp.StatusCode, body)
+		}
+	})
+}
+
+// ClickHouse reads a field-values filter as LogchefQL whether or not the
+// request names query_language, so a request without it gets the filter of an
+// aggregation too, and a filter that does not parse is the caller's error.
+func TestClickHouseFieldValuesWithoutQueryLanguage(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	manager := clickhouse.NewManager(log)
+	t.Cleanup(func() { _ = manager.Close() })
+	s, source := newAggregationTestServer(t, datasource.NewClickHouseProvider(manager, log), models.SourceTypeClickHouse)
+	user, src := authorizeTestSource(t, s.store, source.ID)
+	asUser := func(c fiber.Ctx) error {
+		c.Locals("user", user)
+		c.Locals("auth_method", "session")
+		return c.Next()
+	}
+	app := fiber.New()
+	app.Get("/teams/:teamID/sources/:sourceID/fields/values", asUser, s.requireTeamHasSource(models.TokenScopeLogsRead), s.handleGetAllFieldValues)
+	app.Get("/teams/:teamID/sources/:sourceID/fields/:fieldName/values", asUser, s.requireTeamHasSource(models.TokenScopeLogsRead), s.handleGetFieldValues)
+	base := fmt.Sprintf("/teams/%d/sources/%d", src.TeamID(), source.ID)
+	end := time.Now().UTC()
+	fieldValues := func(t *testing.T, path, query string) (int, map[string]any) {
+		t.Helper()
+		params := url.Values{"type": {"String"}, "start_time": {end.Add(-time.Hour).Format(time.RFC3339)}, "end_time": {end.Format(time.RFC3339)}, "query": {query}}
+		resp, err := app.Test(httptest.NewRequest(http.MethodGet, base+path+"?"+params.Encode(), http.NoBody), fiber.TestConfig{Timeout: 20 * time.Second, FailOnTimeout: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var body map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, body
+	}
+
+	addr := os.Getenv("LOGCHEF_TEST_CLICKHOUSE_ADDR")
+	if addr == "" {
+		t.Skip("set LOGCHEF_TEST_CLICKHOUSE_ADDR to read field values from ClickHouse")
+	}
+	admin, err := ch.Open(&ch.Options{Addr: []string{addr}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	view := fmt.Sprintf("logchef_field_values_%d", time.Now().UnixNano())
+	if err := admin.Exec(t.Context(), "CREATE VIEW default."+view+` AS SELECT now64(3) - INTERVAL 1 MINUTE AS timestamp,
+		toLowCardinality(['error', 'error', 'info'][number + 1]) AS level,
+		toLowCardinality(['api', 'api', 'web'][number + 1]) AS service FROM numbers(3)`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Exec(context.Background(), "DROP VIEW default."+view) })
+	source.MetaTSField = "timestamp"
+	source.Connection = models.ConnectionInfo{Host: addr, Database: "default", TableName: view}
+	if err := s.store.UpdateSource(t.Context(), source); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.AddSource(t.Context(), source); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{"/fields/service/values", "/fields/values"} {
+		t.Run("malformed filter on "+path+" is a bad request", func(t *testing.T) {
+			status, body := fieldValues(t, path, "level=")
+			if want := "Invalid request: query: invalid filter: expected a value after `level=`"; status != http.StatusBadRequest || body["message"] != want {
+				t.Fatalf("status=%d body=%v, want 400 %q", status, body, want)
+			}
+		})
+	}
+	t.Run("unknown column is a bad request", func(t *testing.T) {
+		status, body := fieldValues(t, "/fields/service/values", "nosuch=error")
+		if message, _ := body["message"].(string); status != http.StatusBadRequest || !strings.Contains(message, "nosuch") {
+			t.Fatalf("status=%d body=%v, want 400 naming the column", status, body)
+		}
+	})
+
+	wantService := map[string]any{
+		"field_name": "service", "field_type": "LowCardinality(String)", "is_low_cardinality": true,
+		"values": []any{map[string]any{"value": "api", "count": float64(2)}}, "total_distinct": float64(1),
+	}
+	t.Run("one field reads the filter of an aggregation", func(t *testing.T) {
+		status, body := fieldValues(t, "/fields/service/values", "level=error | count() by service")
+		data, _ := body["data"].(map[string]any)
+		if status != http.StatusOK || !reflect.DeepEqual(data["values"], wantService["values"]) {
+			t.Fatalf("status=%d body=%v, want 200 with api counted twice", status, body)
+		}
+	})
+	t.Run("every field reads the filter of an aggregation", func(t *testing.T) {
+		status, body := fieldValues(t, "/fields/values", "level=error | count() by service")
+		data, _ := body["data"].(map[string]any)
+		if status != http.StatusOK || !reflect.DeepEqual(data["service"], wantService) {
+			t.Fatalf("status=%d body=%v, want 200 with service %v", status, body, wantService)
 		}
 	})
 }

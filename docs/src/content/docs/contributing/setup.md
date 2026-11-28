@@ -2,7 +2,7 @@
 title: Development Setup
 head:
   - tag: title
-    content: "Logchef Local Development Setup | Logchef"
+    content: "Local Development Setup | Logchef"
 description: "Set up a local Logchef development environment with Go, Bun, and Docker. Run the backend and frontend, then test your changes before contributing."
 ---
 
@@ -226,6 +226,6 @@ lsof -i :8123
 
 ## Next Steps
 
-- Review the [Architecture Overview](/core/architecture) to understand the codebase
-- See [Roadmap](/contributing/roadmap) for upcoming features
+- Review the [Architecture Overview](/core/architecture/) to understand the codebase
+- See [Roadmap](/contributing/roadmap/) for upcoming features
 - Read the main [CONTRIBUTING.md](https://github.com/mr-karan/logchef/blob/main/CONTRIBUTING.md) for contribution guidelines
