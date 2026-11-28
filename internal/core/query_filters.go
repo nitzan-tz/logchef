@@ -56,7 +56,10 @@ func filterValueText(value any) string {
 	case bool:
 		return strconv.FormatBool(v)
 	default:
-		raw, _ := json.Marshal(v)
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprint(v)
+		}
 		return string(raw)
 	}
 }
@@ -158,15 +161,16 @@ func logsQLFilter(f models.QueryFilter) string {
 }
 
 // firstPipe is the index of the first pipe outside a quoted string, or -1.
-func firstPipe(query string, quotes string) int {
+func firstPipe(query, quotes string) int {
 	var quote byte
 	for i := 0; i < len(query); i++ {
 		c := query[i]
 		switch {
 		case quote != 0:
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == quote {
+			case quote:
 				quote = 0
 			}
 		case strings.IndexByte(quotes, c) >= 0:
@@ -204,9 +208,10 @@ func logsQLTopLevelOr(filter string) bool {
 		c := filter[i]
 		switch {
 		case quote != 0:
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == quote {
+			case quote:
 				quote = 0
 			}
 		case c == '"' || c == '\'' || c == '`':
