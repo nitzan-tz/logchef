@@ -48,6 +48,7 @@ interface Props {
     sourceId: string
     teamId: number | null
     viewSeed?: TableViewSeed | null // The saved view the layout and sort start from
+    logRows?: boolean // Whether the result holds log rows, the only results a view's columns apply to
     layoutResetToken?: number // A change discards the view's working copy and seeds from the view again
     source?: LogContextSource | null
     displayMode?: 'table' | 'compact'
@@ -66,6 +67,7 @@ const props = withDefaults(defineProps<Props>(), {
     queryFields: () => [],
     regexHighlights: () => ({}),
     activeMode: 'logchefql',
+    logRows: true,
     isLoading: false // Default isLoading to false
 })
 
@@ -154,6 +156,7 @@ const { columnOrder, columnSizing, columnVisibility, setColumnOrder, resetTableS
     severityField: severityFieldName,
     seed: () => props.viewSeed,
     sorting,
+    logRows: () => props.logRows,
 })
 
 function cellTitle(value: unknown): string {
@@ -867,7 +870,7 @@ const wrapLines = useLocalStorage('logchef.explore.wrapLines', false)
                                              widening the table and pushing the field actions off screen. -->
                                         <div class="expanded-row-panel sticky left-0 p-3 bg-muted/30 border-y border-y-primary/40"
                                             :style="viewportWidth > 0 ? { width: `${viewportWidth}px` } : undefined">
-                                            <div class="flex items-center justify-between mb-2 gap-2">
+                                            <div class="flex flex-wrap items-center justify-between mb-2 gap-2">
                                                 <!-- Collapse hint -->
                                                 <button 
                                                     class="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 cursor-pointer"
@@ -947,8 +950,9 @@ const wrapLines = useLocalStorage('logchef.explore.wrapLines', false)
     border: 1px solid hsl(var(--border) / 0.7);
     /* Add subtle outer border */
     border-radius: 6px;
-    overflow: clip; /* clips like hidden without becoming a scroll container, so sticky children follow the scroller */
-    /* Keep rounded corners */
+    /* Clip to the rounded corners. Unlike hidden, clip makes no scroll
+       container, so sticky content sticks to the scrolling wrapper. */
+    overflow: clip;
 }
 
 /* Add proper cell borders */

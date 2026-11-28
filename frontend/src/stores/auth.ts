@@ -51,7 +51,7 @@ export const useAuthStore = defineStore("auth", () => {
               state.data.value.user = response.user;
               state.data.value.session = response.session;
               // Mark that we've had a successful session for future reference
-              sessionStorage.setItem("hadPreviousSession", "true");
+              localStorage.setItem("hadPreviousSession", "true");
             }
           },
           onError: () => {
@@ -72,6 +72,22 @@ export const useAuthStore = defineStore("auth", () => {
     });
   }
 
+  // Reload the signed-in user after a change to their own account, such as
+  // their role. initialize() runs only once per page load.
+  async function refreshSession() {
+    return await state.callApi({
+      apiCall: () => authApi.getSession(),
+      showToast: false,
+      onSuccess: (response: SessionResponse | null) => {
+        if (response) {
+          state.data.value.user = response.user;
+          state.data.value.session = response.session;
+        }
+      },
+      onError: () => clearState(),
+    });
+  }
+
   // Clear auth state
   function clearState() {
     state.data.value.user = null;
@@ -80,7 +96,7 @@ export const useAuthStore = defineStore("auth", () => {
     // On manual logout, we should also clear the session flag
     // but we don't do this on auth failures to distinguish between first visit and actual expiry
     if (state.data.value.isInitialized) {
-      sessionStorage.removeItem("hadPreviousSession");
+      localStorage.removeItem("hadPreviousSession");
     }
   }
 
@@ -116,7 +132,7 @@ export const useAuthStore = defineStore("auth", () => {
               state.data.value.user = response.user;
               state.data.value.session = response.session;
               state.data.value.isInitialized = true;
-              sessionStorage.setItem("hadPreviousSession", "true");
+              localStorage.setItem("hadPreviousSession", "true");
             }
           },
         });
@@ -156,6 +172,7 @@ export const useAuthStore = defineStore("auth", () => {
     isInitializing,
     error,
     initialize,
+    refreshSession,
     startLogin,
     localLogin,
     logout,

@@ -31,7 +31,7 @@ import QueryEditor from "@/components/query-editor/QueryEditor.vue";
 import { useSavedQueries } from "@/composables/useSavedQueries";
 import { useExplorerNavigator } from "@/composables/useExplorerNavigator";
 import { useSavedViewsStore } from "@/stores/savedViews";
-import type { SavedViewDefinition, SavedViewLayout } from "@/lib/savedViewLayout";
+import { isLogRowResult, type SavedViewDefinition, type SavedViewLayout } from "@/lib/savedViewLayout";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import { useQuery } from "@/composables/useQuery";
 import { supportsQueryLanguage, hasSourceCapability, getNativeQueryLanguageForSource } from "@/lib/queryMetadata";
@@ -403,9 +403,7 @@ const handleAddGroupCondition = (field: string, value: unknown) => handleDrillDo
 const handleAddColumn = (data: { field: string; shownColumns: string[] }) => {
   if (activeMode.value !== "logchefql") return;
   logchefQuery.value = addSelectField(logchefQuery.value ?? "", data.field, data.shownColumns);
-  nextTick(() => {
-    queryEditorRef.value?.focus(true);
-  });
+  nav.run();
 };
 
 // Event Handlers for QueryEditor
@@ -800,7 +798,7 @@ const appendLogsqlExpression = (query: string, expression: string) => {
 
 // Handle adding a field filter from the sidebar. Native LogsQL on screen keeps
 // its mode, like a filter from a table cell.
-const handleAddFieldFilter = (field: string, value: string, operator: '=' | '!=') => {
+const handleAddFieldFilter = async (field: string, value: string, operator: '=' | '!=') => {
   const filterValue = /^\d+$/.test(value) ? Number(value) : value;
   if (filterLanguage.value) {
     addFilterPill(filterFromAction(field, operator, filterLanguage.value === "logsql" ? value : filterValue));
@@ -814,17 +812,15 @@ const handleAddFieldFilter = (field: string, value: string, operator: '=' | '!='
     exploreStore.setNativeQuery(appendLogsqlExpression(currentQuery, filterExpression));
 
     if (activeMode.value !== 'native') {
-      changeMode('native');
+      await changeMode('native');
     }
 
-    nextTick(() => {
-      queryEditorRef.value?.focus(true);
-    });
+    nav.run();
     return;
   }
 
   // Native SQL takes no pills, so the filter switches to LogchefQL.
-  changeMode('logchefql');
+  await changeMode('logchefql');
   addFilterPill(filterFromAction(field, operator, filterValue));
 };
 
@@ -848,7 +844,7 @@ const handleAddFieldColumn = async (field: string) => {
   if (table?.showColumn?.(field)) return;
   if (activeMode.value === "logchefql" && runs.results && !aggregation.value) {
     logchefQuery.value = addSelectField(logchefQuery.value ?? "", fieldPath([field]), table?.shownColumns ?? []);
-    nextTick(() => queryEditorRef.value?.focus(true));
+    nav.run();
     return;
   }
   toast({
@@ -1300,6 +1296,7 @@ const onSaveQueryModalSave = async (formData: SaveQueryFormData, done?: () => vo
                     :display-mode="displayMode"
                     v-bind="displayMode === 'table' ? {
                       viewSeed: savedViews.activeSeed,
+                      logRows: isLogRowResult(runs.results, sourcesStore.currentSourceDetails),
                       layoutResetToken: savedViews.layoutResetToken,
                       onWorkingLayout: (layout: SavedViewLayout) => savedViews.reportTableLayout(savedViews.activeViewId, layout),
                       onTableLayout: (layout: SavedViewLayout) => savedViews.reportTableLayout(null, layout),

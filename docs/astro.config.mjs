@@ -7,11 +7,12 @@ import starlightLlmsTxt from "starlight-llms-txt";
 const siteUrl = "https://logchef.app";
 const ogImage = `${siteUrl}/screenshots/hero-light.png`;
 const siteDescription =
-  "Logchef is a lightweight, self-hosted log analytics and observability platform for teams that want a strong query and control plane on top of existing log backends (ClickHouse and VictoriaLogs). Query with LogchefQL, native SQL, or LogsQL, build dashboards, set up alerting, and manage access, all from a single binary.";
+  "Logchef is a lightweight, self-hosted log analytics and observability platform for teams that want a strong query and control plane on top of existing log backends (ClickHouse, VictoriaLogs and Grafana Loki). Query with LogchefQL, native SQL, LogsQL or LogQL, build dashboards, set up alerting, and manage access, all from a single binary.";
 
 // https://astro.build/config
 export default defineConfig({
   site: siteUrl,
+  trailingSlash: "always",
   image: {
     service: passthroughImageService(),
   },
@@ -45,19 +46,20 @@ export default defineConfig({
         // Generates /llms.txt + /llms-full.txt from the docs content at build time.
         starlightLlmsTxt({
           description: siteDescription,
-          details: `Logchef supports two datasource backends with different query languages:
+          details: `Logchef supports three datasource backends with different query languages:
 
 - **ClickHouse** sources: query with LogchefQL (Logchef's own simplified filter syntax) or native ClickHouse SQL.
-- **VictoriaLogs** sources: query with LogsQL.
+- **VictoriaLogs** sources: query with LogchefQL or LogsQL.
+- **Grafana Loki** sources: query with LogchefQL or LogQL.
 
 Key areas of the docs:
 
 - Getting Started: install, configure, and understand the architecture.
-- Querying Logs: LogchefQL syntax, SQL examples, the query interface, and the field sidebar.
-- Features: collections/saved queries, dashboards, alerting, AI SQL generation, the ClickHouse schema advisor, user management, service tokens, and declarative provisioning.
+- Querying Logs: LogchefQL syntax and aggregations, SQL examples, LogsQL and LogQL queries, time macros, the query interface, and the field sidebar.
+- Features: collections/saved queries, saved views, dashboards, alerting, scheduled reports, AI SQL generation, the ClickHouse schema advisor, user management, service tokens, and declarative provisioning.
 - Integration: CLI, MCP server (for AI assistants), and schema design guidance.
-- Tutorials: connecting VictoriaLogs, ingesting via Vector/OTEL, and a worked NGINX logs example.
-- Operations: database backends (SQLite vs Postgres), reverse proxy and subpath setup, and the Prometheus metrics reference.`,
+- Tutorials: connecting VictoriaLogs and Grafana Loki, ingesting via Vector/OTEL, and a worked NGINX logs example.
+- Operations: database backends (SQLite vs Postgres), reverse proxy and subpath setup, the Prometheus metrics reference, and the audit log.`,
           optionalLinks: [
             {
               label: "GitHub repository",
@@ -171,95 +173,97 @@ Key areas of the docs:
         {
           label: "Getting Started",
           items: [
-            { label: "Quick Start", link: "/getting-started/quickstart" },
-            { label: "Configuration", link: "/getting-started/configuration" },
-            { label: "Architecture", link: "/core/architecture" },
+            { label: "Quick Start", link: "/getting-started/quickstart/" },
+            { label: "Configuration", link: "/getting-started/configuration/" },
+            { label: "Architecture", link: "/core/architecture/" },
           ],
         },
         {
           label: "Querying Logs",
           items: [
-            { label: "Query Interface", link: "/user-guide/query-interface" },
-            { label: "Command Palette", link: "/features/command-palette" },
-            { label: "LogchefQL Syntax", link: "/guide/search-syntax" },
-            { label: "LogchefQL Aggregations", link: "/guide/aggregations" },
-            { label: "SQL Examples", link: "/guide/examples" },
-            { label: "LogsQL Queries", link: "/guide/logsql-queries" },
-            { label: "LogQL Queries", link: "/guide/logql-queries" },
-            { label: "Time Macros", link: "/guide/time-macros" },
-            { label: "VictoriaLogs Windowed Search", link: "/guide/windowed-search" },
-            { label: "Field Sidebar", link: "/features/field-sidebar" },
+            { label: "Query Interface", link: "/user-guide/query-interface/" },
+            { label: "Command Palette", link: "/features/command-palette/" },
+            { label: "LogchefQL Syntax", link: "/guide/search-syntax/" },
+            { label: "LogchefQL Playground", link: "/playground/" },
+            { label: "LogchefQL Aggregations", link: "/guide/aggregations/" },
+            { label: "SQL Examples", link: "/guide/examples/" },
+            { label: "LogsQL Queries", link: "/guide/logsql-queries/" },
+            { label: "LogQL Queries", link: "/guide/logql-queries/" },
+            { label: "Time Macros", link: "/guide/time-macros/" },
+            { label: "VictoriaLogs Windowed Search", link: "/guide/windowed-search/" },
+            { label: "Field Sidebar", link: "/features/field-sidebar/" },
           ],
         },
         {
           label: "Features",
           items: [
-            { label: "Collections & Saved Queries", link: "/features/collections" },
-            { label: "Saved Views", link: "/features/saved-views" },
-            { label: "Dashboards", link: "/features/dashboards" },
-            { label: "Dashboard Gallery", link: "/features/dashboard-gallery" },
-            { label: "Alerting", link: "/features/alerting" },
-            { label: "Scheduled Reports", link: "/features/scheduled-reports" },
-            { label: "AI SQL Generation", link: "/features/ai-sql-generation" },
-            { label: "Schema Advisor", link: "/features/schema-advisor" },
-            { label: "User Management", link: "/core/user-management" },
-            { label: "Service Tokens", link: "/features/service-tokens" },
-            { label: "Provisioning", link: "/getting-started/provisioning" },
+            { label: "Collections & Saved Queries", link: "/features/collections/" },
+            { label: "Saved Views", link: "/features/saved-views/" },
+            { label: "Dashboards", link: "/features/dashboards/" },
+            { label: "Dashboard Gallery", link: "/features/dashboard-gallery/" },
+            { label: "Alerting", link: "/features/alerting/" },
+            { label: "Scheduled Reports", link: "/features/scheduled-reports/" },
+            { label: "AI SQL Generation", link: "/features/ai-sql-generation/" },
+            { label: "Schema Advisor", link: "/features/schema-advisor/" },
+            { label: "User Management", link: "/core/user-management/" },
+            { label: "Service Tokens", link: "/features/service-tokens/" },
+            { label: "Provisioning", link: "/getting-started/provisioning/" },
           ],
         },
         {
           label: "Integration",
           items: [
-            { label: "Overview", link: "/integration" },
-            { label: "Vector", link: "/integration/vector" },
-            { label: "OpenTelemetry Collector", link: "/integration/otel-collector" },
-            { label: "Kubernetes Logs", link: "/integration/kubernetes" },
-            { label: "Docker Logs", link: "/integration/docker" },
-            { label: "CLI", link: "/integration/cli" },
-            { label: "Agent Setup", link: "/integration/agent-setup" },
-            { label: "MCP Server", link: "/integration/mcp-server" },
-            { label: "Schema Design", link: "/integration/schema-design" },
+            { label: "Overview", link: "/integration/" },
+            { label: "Vector", link: "/integration/vector/" },
+            { label: "OpenTelemetry Collector", link: "/integration/otel-collector/" },
+            { label: "Kubernetes Logs", link: "/integration/kubernetes/" },
+            { label: "Docker Logs", link: "/integration/docker/" },
+            { label: "CLI", link: "/integration/cli/" },
+            { label: "Agent Setup", link: "/integration/agent-setup/" },
+            { label: "MCP Server", link: "/integration/mcp-server/" },
+            { label: "Schema Design", link: "/integration/schema-design/" },
           ],
         },
         {
           label: "Tutorials",
           items: [
-            { label: "VictoriaLogs", link: "/tutorials/victorialogs" },
-            { label: "VictoriaLogs Explorer", link: "/tutorials/victorialogs-explorer" },
-            { label: "Grafana Loki", link: "/tutorials/loki" },
-            { label: "NGINX Logs", link: "/tutorials/nginx-logs" },
+            { label: "VictoriaLogs", link: "/tutorials/victorialogs/" },
+            { label: "VictoriaLogs Explorer", link: "/tutorials/victorialogs-explorer/" },
+            { label: "Grafana Loki", link: "/tutorials/loki/" },
+            { label: "NGINX Logs", link: "/tutorials/nginx-logs/" },
           ],
         },
         {
           label: "Comparisons",
           items: [
-            { label: "Overview", link: "/comparisons" },
-            { label: "Logchef vs ClickStack", link: "/comparisons/logchef-vs-clickstack" },
-            { label: "Logchef vs SigNoz", link: "/comparisons/logchef-vs-signoz" },
-            { label: "Logchef vs Grafana Loki", link: "/comparisons/logchef-vs-grafana-loki" },
-            { label: "Logchef vs Grafana", link: "/comparisons/logchef-vs-grafana" },
-            { label: "Logchef vs Elasticsearch", link: "/comparisons/logchef-vs-elasticsearch" },
-            { label: "Logchef vs OpenObserve", link: "/comparisons/logchef-vs-openobserve" },
-            { label: "Logchef vs Graylog", link: "/comparisons/logchef-vs-graylog" },
-            { label: "Logchef vs Datadog", link: "/comparisons/logchef-vs-datadog" },
+            { label: "Overview", link: "/comparisons/" },
+            { label: "VictoriaLogs vs ClickHouse", link: "/comparisons/victorialogs-vs-clickhouse/" },
+            { label: "Logchef vs ClickStack", link: "/comparisons/logchef-vs-clickstack/" },
+            { label: "Logchef vs SigNoz", link: "/comparisons/logchef-vs-signoz/" },
+            { label: "Logchef vs Grafana Loki", link: "/comparisons/logchef-vs-grafana-loki/" },
+            { label: "Logchef vs Grafana", link: "/comparisons/logchef-vs-grafana/" },
+            { label: "Logchef vs Elasticsearch", link: "/comparisons/logchef-vs-elasticsearch/" },
+            { label: "Logchef vs OpenObserve", link: "/comparisons/logchef-vs-openobserve/" },
+            { label: "Logchef vs Graylog", link: "/comparisons/logchef-vs-graylog/" },
+            { label: "Logchef vs Datadog", link: "/comparisons/logchef-vs-datadog/" },
           ],
         },
         {
           label: "Migrate to Logchef",
           items: [
-            { label: "Overview", link: "/migrate" },
-            { label: "From Elasticsearch", link: "/migrate/from-elasticsearch" },
-            { label: "From Loki", link: "/migrate/from-loki" },
+            { label: "Overview", link: "/migrate/" },
+            { label: "From Elasticsearch", link: "/migrate/from-elasticsearch/" },
+            { label: "From Loki", link: "/migrate/from-loki/" },
           ],
         },
         {
           label: "Operations",
           items: [
-            { label: "Database & High Availability", link: "/operations/database-backends" },
-            { label: "Reverse Proxy", link: "/operations/reverse-proxy" },
-            { label: "Metrics Reference", link: "/operations/metrics" },
-            { label: "Audit Log", link: "/operations/audit-log" },
-            { label: "Contributing", link: "/contributing/setup" },
+            { label: "Database & High Availability", link: "/operations/database-backends/" },
+            { label: "Reverse Proxy", link: "/operations/reverse-proxy/" },
+            { label: "Metrics Reference", link: "/operations/metrics/" },
+            { label: "Audit Log", link: "/operations/audit-log/" },
+            { label: "Contributing", link: "/contributing/setup/" },
           ],
         },
       ],

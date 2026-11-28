@@ -27,7 +27,7 @@ type GetAllFieldDimensionsParams struct {
 // --- Handlers ---
 
 // get_all_field_dimensions returns dynamic data, so it uses a typed handler.
-func (t *tools) handleGetAllFieldDimensions(ctx context.Context, _ mcp.CallToolRequest, params GetAllFieldDimensionsParams) (*mcp.CallToolResult, error) {
+func (t *tools) handleGetAllFieldDimensions(ctx context.Context, req mcp.CallToolRequest, params GetAllFieldDimensionsParams) (*mcp.CallToolResult, error) {
 	limit := params.Limit
 	if limit <= 0 {
 		limit = 10
@@ -45,10 +45,14 @@ func (t *tools) handleGetAllFieldDimensions(ctx context.Context, _ mcp.CallToolR
 	if err != nil {
 		return t.errorResult(t.storeError("get all field dimensions failed", err)), nil
 	}
+	read := t.startRead(ctx, req, ReadCall{Source: src, Query: params.Query, Language: models.QueryLanguageLogchefQL, Limit: limit})
+	defer func() { read.end(recover()) }()
 	startTime, endTime, err := parseTimeRange(params.StartTime, params.EndTime)
 	if err != nil {
+		read.Err = err
 		return t.errorResult(t.storeError("get all field dimensions failed", err)), nil
 	}
+	read.From, read.To = &startTime, &endTime
 	var result map[string]*core.FieldValuesResult
 	err = t.admit(ctx, QueryClassPreview, src, "get_all_field_dimensions", func(ctx context.Context, _ string) error {
 		if err := t.checkFieldFilter(ctx, src, params.Query); err != nil {
@@ -68,14 +72,18 @@ func (t *tools) handleGetAllFieldDimensions(ctx context.Context, _ mcp.CallToolR
 		return err
 	})
 	if err != nil {
+		read.Err = err
 		return t.errorResult(t.queryError("get all field dimensions failed", err)), nil
+	}
+	for _, field := range result {
+		read.Rows += int64(len(field.Values))
 	}
 	return jsonTextResult(result)
 }
 
 func (t *tools) addDiscoverTools(s *server.MCPServer) {
 	dimensionsTool := mcp.NewTool("get_all_field_dimensions",
-		mcp.WithDescription("Get top values for all LowCardinality fields in one call. Returns a map of field names to their top values with counts. Counts every log in the window unless query filters them. Much faster than calling get_field_values for each field individually. Use this for initial source exploration to understand what dimensions exist."),
+		mcp.WithDescription("Get top values for every filterable field in one call: LowCardinality, String, Enum and number columns, except log-body columns such as msg, message and body, whose values are whole log lines (ask get_field_values for one by name). Returns a map of field names to their top values with counts. A field that was not read, such as one that timed out, has an error and empty values: its values are unknown, not absent. Read it with get_field_values or a shorter window. Counts every log in the window unless query filters them. Much faster than calling get_field_values for each field individually. Use this for initial source exploration to understand what dimensions exist."),
 		mcp.WithInputSchema[GetAllFieldDimensionsParams](),
 		mcp.WithTitleAnnotation("Get All Field Dimensions"),
 		readOnlyTool,

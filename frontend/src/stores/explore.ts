@@ -641,6 +641,26 @@ export const useExploreStore = defineStore("explore", () => {
   }
 
   /**
+   * Leaving a view: unless the editor's query differs from the view's filter,
+   * the filter leaves the editor and the view's range gives way to the
+   * default. Returns whether the query changed, so the caller runs it.
+   */
+  function clearViewQuery({ filter, time_range }: ViewQueryDefaults): boolean {
+    const { activeMode, logchefqlCode, filters } = state.data.value;
+    // A filter pill edits the query as much as the text does.
+    const edited = activeMode !== "logchefql" || logchefqlCode.trim() !== filter?.trim() || filters.some((item) => !item.disabled);
+    if (filter !== undefined && edited) return false;
+    const window = time_range === undefined ? null : relativeWindow(time_range);
+    const clearsWindow = window !== null && sameWindow(timeWindow.value, window);
+    if (filter === undefined && !clearsWindow) return false;
+    if (clearsWindow) assignWindow(DEFAULT_WINDOW);
+    if (filter !== undefined) state.data.value.logchefqlCode = "";
+    clearShareSelectionIfDirty();
+    persistDraft();
+    return true;
+  }
+
+  /**
    * Shows one location's team, source and content, with the active view's
    * query defaults filling what it leaves open. Returns whether it has
    * something to run.
@@ -1014,6 +1034,7 @@ export const useExploreStore = defineStore("explore", () => {
     resetQueryToDefaults,
     fillViewFilter,
     resetToViewQuery,
+    clearViewQuery,
     persistDraft,
     getLogContext,
     createQueryShare,

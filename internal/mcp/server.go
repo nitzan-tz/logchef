@@ -30,6 +30,9 @@ type QueryClass int
 const (
 	QueryClassPreview QueryClass = iota + 1
 	QueryClassHistogram
+	// QueryClassBacktest replays an alert rule: up to 120 queries, so its
+	// budget is smaller than a preview's.
+	QueryClassBacktest
 )
 
 // AdmitQuery reserves a slot in the server's query admission tracker under
@@ -47,6 +50,7 @@ type Deps struct {
 	Version     string
 	Log         *slog.Logger
 	Admit       AdmitQuery
+	StartRead   StartRead
 	// ResourceMetadataURL is the protected resource metadata URL that auth
 	// challenges in tool results name. Empty omits it.
 	ResourceMetadataURL string
@@ -116,6 +120,8 @@ func newMCPServer(deps Deps) *server.MCPServer {
 	t.addInvestigateTools(s)
 	t.addAnalysisTools(s)
 	t.addDiscoverTools(s)
+	t.addAlertingTools(s)
+	t.addDashboardTools(s)
 	t.addResourceTemplates(s)
 	addPrompts(s)
 	return s
@@ -170,6 +176,13 @@ var toolScopes = map[string][]models.TokenScope{
 	"get_log_context":          {models.TokenScopeLogsRead},
 	"list_alerts":              {models.TokenScopeAlertsRead},
 	"get_alert_history":        {models.TokenScopeAlertsRead},
+	"test_alert":               {models.TokenScopeAlertsRead},
+	"backtest_alert":           {models.TokenScopeAlertsRead},
+	"list_alert_silences":      {models.TokenScopeAlertsRead},
+	"list_collections":         {models.TokenScopeCollectionsRead},
+	"list_destinations":        {models.TokenScopeDestinationsRead},
+	"list_dashboards":          {models.TokenScopeDashboardsRead},
+	"get_dashboard":            {models.TokenScopeDashboardsRead},
 	"compare_windows":          {models.TokenScopeLogsRead},
 	"top_values":               {models.TokenScopeSourcesRead, models.TokenScopeLogsRead},
 	"get_all_field_dimensions": {models.TokenScopeLogsRead},
@@ -240,7 +253,7 @@ func (t *tools) admit(ctx context.Context, class QueryClass, src access.Authoriz
 	defer cancel()
 	queryID, release, err := t.deps.Admit(class, src, queryText, cancel)
 	if err != nil {
-		return &admissionError{message: err.Error()}
+		return &admissionError{message: err.Error(), err: err}
 	}
 	defer release()
 	return work(ctx, queryID)
@@ -249,9 +262,13 @@ func (t *tools) admit(ctx context.Context, class QueryClass, src access.Authoriz
 // admissionError is a refusal from AdmitQuery. Its message is shown.
 type admissionError struct {
 	message string
+	err     error
 }
 
 func (e *admissionError) Error() string { return e.message }
+
+// Unwrap returns the refusal that AdmitQuery returned.
+func (e *admissionError) Unwrap() error { return e.err }
 
 var (
 	errAlertsDisabled  = errors.New("alerting is disabled on this server")
@@ -292,10 +309,13 @@ func (t *tools) queryError(op string, err error) error {
 // any other error.
 func knownError(op string, err error) error {
 	if reqErr, ok := errors.AsType[*core.QueryRequestError](err); ok {
-		return fmt.Errorf("%s: %s", op, reqErr.Message)
+		return &maskedError{msg: op + ": " + reqErr.Message, cause: err}
 	}
 	if admitErr, ok := errors.AsType[*admissionError](err); ok {
-		return fmt.Errorf("%s: %s", op, admitErr.message)
+		return &maskedError{msg: op + ": " + admitErr.message, cause: err}
+	}
+	if replayErr, ok := errors.AsType[*datasource.ReplayError](err); ok {
+		return &maskedError{msg: op + ": " + replayErr.Reason, cause: err}
 	}
 	switch {
 	case errors.Is(err, errNoPrincipal),
@@ -307,17 +327,30 @@ func knownError(op string, err error) error {
 		errors.Is(err, core.ErrTeamNotFound),
 		errors.Is(err, core.ErrQueryNotFound),
 		errors.Is(err, core.ErrAlertNotFound),
+		errors.Is(err, core.ErrInvalidAlertConfiguration),
+		errors.Is(err, core.ErrDashboardNotFound),
 		errors.Is(err, core.ErrLogchefQLNotSupported),
 		errors.Is(err, models.ErrHistogramBudgetExceeded),
 		errors.Is(err, errAlertsDisabled),
 		errors.Is(err, errInvalidArgument):
 		return fmt.Errorf("%s: %w", op, err)
 	case errors.Is(err, context.DeadlineExceeded):
-		return fmt.Errorf("%s: timed out", op)
+		return &maskedError{msg: op + ": timed out", cause: err}
 	case errors.Is(err, context.Canceled):
-		return fmt.Errorf("%s: cancelled", op)
+		return &maskedError{msg: op + ": cancelled", cause: err}
 	case errors.Is(err, datasource.ErrOperationNotSupported):
-		return fmt.Errorf("%s: not supported for this source type", op)
+		return &maskedError{msg: op + ": not supported for this source type", cause: err}
 	}
 	return nil
 }
+
+// maskedError shows the caller a safe message and keeps the original error
+// for errors.Is and errors.As, so the query.run event still records a
+// cancellation or timeout as such.
+type maskedError struct {
+	msg   string
+	cause error
+}
+
+func (e *maskedError) Error() string { return e.msg }
+func (e *maskedError) Unwrap() error { return e.cause }

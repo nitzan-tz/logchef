@@ -89,21 +89,32 @@ type Server struct {
 	// audit table, the only events an unauthenticated caller can cause.
 	signInFailureAudit *auth.WindowLimiter
 
-	listener        net.Listener
-	baseCtx         context.Context //nolint:containedctx // Server owns the cancellation and waits for its workers.
-	backgroundMu    sync.Mutex
-	shutdownOnce    sync.Once
-	shutdownErr     error
-	backgroundDone  chan struct{}
-	exportOwner     models.ExportJobOwner
-	historyQueue    chan *models.QueryHistory
-	historyDropped  atomic.Uint64
-	historyDrainCtx context.Context //nolint:containedctx // Published before the stop channel closes.
-	shapes          shapeRecorder
-	tokenQueue      chan int
-	tokenLastQueued map[int]time.Time
-	tokenDropped    atomic.Uint64
-	stop            chan struct{} // closed by Shutdown to stop background maintenance loops
+	listener            net.Listener
+	baseCtx             context.Context //nolint:containedctx // Server owns the cancellation and waits for its workers.
+	backgroundMu        sync.Mutex
+	shutdownOnce        sync.Once
+	shutdownErr         error
+	backgroundDone      chan struct{}
+	exportOwner         models.ExportJobOwner
+	queryRecords        chan queryRecord
+	queryRecordsDropped atomic.Uint64
+	historyDrainCtx     context.Context //nolint:containedctx // Published before the stop channel closes.
+	shapes              shapeRecorder
+	tokenQueue          chan int
+	tokenLastQueued     map[int]time.Time
+	tokenDropped        atomic.Uint64
+	stop                chan struct{} // closed by Shutdown to stop background maintenance loops
+
+	// activeQueryRuns counts unfinished query runs. Once Shutdown has
+	// stopped the HTTP server, so no handler starts another run,
+	// queryRunsDone closes when the count reaches zero. The writer accepts
+	// records until then, and sets queryRecordsClosed when it stops. All
+	// are guarded by backgroundMu.
+	activeQueryRuns    int
+	httpStopped        bool
+	queryRunsDone      chan struct{}
+	queryRecordsClosed bool
+
 	// cancelRequests cancels the base context every request runs on (see
 	// requestContext).
 	cancelRequests context.CancelFunc
@@ -221,11 +232,12 @@ func New(opts ServerOptions) *Server {
 		exportOwner:     models.ExportJobOwner{InstanceID: opts.Config.Export.InstanceID, ProcessID: uuid.NewString()},
 		baseCtx:         baseCtx,
 		backgroundDone:  make(chan struct{}),
-		historyQueue:    make(chan *models.QueryHistory, 128),
+		queryRecords:    make(chan queryRecord, 128),
 		tokenQueue:      make(chan int, 128),
 		tokenLastQueued: make(map[int]time.Time),
 		stop:            make(chan struct{}),
 		cancelRequests:  cancelRequests,
+		queryRunsDone:   make(chan struct{}),
 	}
 
 	s.signInFailureAudit = auth.NewGlobalWindowLimiter(time.Minute, failedSignInEventsPerMinute)
@@ -392,6 +404,7 @@ func (s *Server) setupRoutes() {
 
 	// Global Team Management
 	admin.Get("/teams", s.requireTokenScope(models.TokenScopeTeamsRead), s.handleListTeams)
+	admin.Get("/team-memberships", s.requireTokenScope(models.TokenScopeTeamsRead), s.handleListAllTeamMemberships)
 	admin.Post("/teams", s.requireTokenScope(models.TokenScopeTeamsWrite), s.handleCreateTeam).Name(string(audit.TeamCreate))
 	admin.Delete("/teams/:teamID", s.requireTokenScope(models.TokenScopeTeamsWrite), s.requireTeamNotManaged, s.handleDeleteTeam).Name(string(audit.TeamDelete))
 
@@ -411,10 +424,8 @@ func (s *Server) setupRoutes() {
 	admin.Put("/sources/:sourceID/advisor/findings/:findingID/dismissal", s.requireTokenScope(models.TokenScopeSourcesWrite), s.handleDismissSchemaFinding).Name(string(audit.SchemaAdvisorDismissalCreate))
 	admin.Delete("/sources/:sourceID/advisor/findings/:findingID/dismissal", s.requireTokenScope(models.TokenScopeSourcesWrite), s.handleRestoreSchemaFinding).Name(string(audit.SchemaAdvisorDismissalDelete))
 
-	// Recent query activity (admin recent-activity view over query_history).
-	admin.Get("/query-activity", s.requireTokenScope(models.TokenScopeLogsRead), s.handleAdminQueryActivity)
-
-	// Authoritative all-time usage analytics over the non-pruned query_stats_daily rollup.
+	// Query Activity: usage analytics over the query_stats_daily and
+	// query_shape_stats_daily rollups.
 	admin.Get("/query-stats", s.requireTokenScope(models.TokenScopeLogsRead), s.handleAdminQueryStats)
 
 	// Audit log (RFC 0009). The export records audit_event.export.
@@ -443,6 +454,7 @@ func (s *Server) setupRoutes() {
 	teamMembers.Get("/", s.requireTokenScope(models.TokenScopeTeamsRead), s.handleListTeamMembers) // Any team member can view
 	// Team admins can add/remove members even on managed teams (day-to-day operations)
 	teamMembers.Post("/", s.requireTokenScope(models.TokenScopeTeamsWrite), s.requireTeamAdminOrGlobalAdmin, s.handleAddTeamMember).Name(string(audit.TeamMemberAdd))
+	teamMembers.Put("/:userID", s.requireTokenScope(models.TokenScopeTeamsWrite), s.requireTeamAdminOrGlobalAdmin, s.handleUpdateTeamMember).Name(string(audit.TeamMemberUpdate))
 	teamMembers.Delete("/:userID", s.requireTokenScope(models.TokenScopeTeamsWrite), s.requireTeamAdminOrGlobalAdmin, s.handleRemoveTeamMember).Name(string(audit.TeamMemberRemove))
 
 	// Team settings — managed guard only on structural changes (rename/description)
@@ -466,6 +478,7 @@ func (s *Server) setupRoutes() {
 	collections.Put("/:collectionID", s.requireTokenScope(models.TokenScopeCollectionsWrite), s.handleUpdateCollection).Name(string(audit.CollectionUpdate))
 	collections.Delete("/:collectionID", s.requireTokenScope(models.TokenScopeCollectionsWrite), s.handleDeleteCollection).Name(string(audit.CollectionDelete))
 	collections.Post("/:collectionID/members", s.requireTokenScope(models.TokenScopeCollectionsWrite), s.handleAddCollectionMember).Name(string(audit.CollectionMemberAdd))
+	collections.Put("/:collectionID/members/:userID", s.requireTokenScope(models.TokenScopeCollectionsWrite), s.handleUpdateCollectionMember).Name(string(audit.CollectionMemberUpdate))
 	collections.Delete("/:collectionID/members/:userID", s.requireTokenScope(models.TokenScopeCollectionsWrite), s.handleRemoveCollectionMember).Name(string(audit.CollectionMemberRemove))
 	collections.Post("/:collectionID/teams", s.requireTokenScope(models.TokenScopeCollectionsWrite), s.handleAddCollectionTeam).Name(string(audit.CollectionTeamAdd))
 	collections.Delete("/:collectionID/teams/:teamID", s.requireTokenScope(models.TokenScopeCollectionsWrite), s.handleRemoveCollectionTeam).Name(string(audit.CollectionTeamRemove))
@@ -548,8 +561,8 @@ func (s *Server) setupRoutes() {
 	alertRoutes := api.Group("/alerts", s.requireAuth, s.requireAlertsEnabled)
 	alertRoutes.Get("/", s.requireTokenScope(models.TokenScopeAlertsRead), s.handleListAlerts)
 	alertRoutes.Post("/", s.requireTokenScope(models.TokenScopeAlertsWrite), s.handleCreateAlert).Name(string(audit.AlertCreate))
-	alertRoutes.Post("/test", s.requireTokenScope(models.TokenScopeAlertsWrite), s.handleTestAlertQuery)
-	alertRoutes.Post("/backtest", s.requireTokenScope(models.TokenScopeAlertsWrite), s.handleBacktestAlert)
+	alertRoutes.Post("/test", s.requireTokenScope(models.TokenScopeAlertsRead), s.handleTestAlertQuery)
+	alertRoutes.Post("/backtest", s.requireTokenScope(models.TokenScopeAlertsRead), s.handleBacktestAlert)
 	alertRoutes.Get("/:alertID", s.requireTokenScope(models.TokenScopeAlertsRead), s.handleGetAlert)
 	alertRoutes.Put("/:alertID", s.requireTokenScope(models.TokenScopeAlertsWrite), s.handleUpdateAlert).Name(string(audit.AlertUpdate))
 	alertRoutes.Delete("/:alertID", s.requireTokenScope(models.TokenScopeAlertsWrite), s.handleDeleteAlert).Name(string(audit.AlertDelete))
@@ -711,6 +724,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 				s.shutdownErr = err
 				s.log.Warn("HTTP shutdown failed", "error", err)
 			}
+			s.backgroundMu.Lock()
+			s.httpStopped = true
+			s.closeIfQueryRunsDone()
+			s.backgroundMu.Unlock()
 			s.wg.Wait()
 			s.logBackgroundDrops()
 			if s.dashCache != nil {

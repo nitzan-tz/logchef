@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ func Run(t *testing.T, s store.Store) {
 	t.Run("TeamMapping", func(t *testing.T) { testTeamMapping(t, ctx, s) })
 	t.Run("GetNotFound", func(t *testing.T) { testGetNotFound(t, ctx, s) })
 	t.Run("TeamsMembersSources", func(t *testing.T) { testTeams(t, ctx, s) })
+	t.Run("AllTeamMemberships", func(t *testing.T) { testAllTeamMemberships(t, ctx, s) })
 	t.Run("LokiSource", func(t *testing.T) { testLokiSource(t, ctx, s) })
 	t.Run("SourceHeaderSecretRefs", func(t *testing.T) { testSourceHeaderSecretRefs(t, ctx, s) })
 	t.Run("Sessions", func(t *testing.T) { testSessions(t, ctx, s) })
@@ -35,6 +37,7 @@ func Run(t *testing.T, s store.Store) {
 	t.Run("SettingsParsing", func(t *testing.T) { testSettingsParsing(t, ctx, s) })
 	t.Run("SettingsSensitivity", func(t *testing.T) { testSettingsSensitivity(t, ctx, s) })
 	t.Run("SavedQueriesCollections", func(t *testing.T) { testSavedQueriesCollections(t, ctx, s) })
+	t.Run("CollectionMemberRoles", func(t *testing.T) { testCollectionMemberRoles(t, ctx, s) })
 	t.Run("CollectionTeams", func(t *testing.T) { testCollectionTeams(t, ctx, s) })
 	t.Run("CollectionLinks", func(t *testing.T) { testCollectionLinks(t, ctx, s) })
 	t.Run("SavedViews", func(t *testing.T) { testSavedViews(t, ctx, s) })
@@ -45,8 +48,11 @@ func Run(t *testing.T, s store.Store) {
 	t.Run("QueryHistory", func(t *testing.T) { testQueryHistory(t, ctx, s) })
 	t.Run("QueryStats", func(t *testing.T) { testQueryStats(t, ctx, s) })
 	t.Run("QueryShapeStats", func(t *testing.T) { testQueryShapeStats(t, ctx, s) })
+	t.Run("QueryCostAndFailures", func(t *testing.T) { testQueryCostAndFailures(t, ctx, s) })
+	t.Run("TopQueryShapes", func(t *testing.T) { testTopQueryShapes(t, ctx, s) })
 	t.Run("SchemaAdvisorReports", func(t *testing.T) { testSchemaAdvisorReports(t, ctx, s) })
 	t.Run("SchemaAdvisorDismissals", func(t *testing.T) { testSchemaAdvisorDismissals(t, ctx, s) })
+	t.Run("SchemaAdvisorBySources", func(t *testing.T) { testSchemaAdvisorBySources(t, ctx, s) })
 	t.Run("Alerts", func(t *testing.T) { testAlerts(t, ctx, s) })
 	t.Run("AlertInstances", func(t *testing.T) { testAlertInstances(t, ctx, s) })
 	t.Run("AlertGroups", func(t *testing.T) { testAlertGroups(t, ctx, s) })
@@ -237,6 +243,68 @@ func testTeams(t *testing.T, ctx context.Context, s store.Store) {
 	srcs, err := s.ListTeamSources(ctx, team.ID)
 	if err != nil || len(srcs) != 1 {
 		t.Fatalf("ListTeamSources: %v / %d", err, len(srcs))
+	}
+}
+
+func testAllTeamMemberships(t *testing.T, ctx context.Context, s store.Store) {
+	ann := mkUser(t, ctx, s, "all-memberships-ann@test.dev")
+	ben := mkUser(t, ctx, s, "all-memberships-ben@test.dev")
+	// Team names sort case-insensitively, so "aaa-yankee" precedes "AAA-Zulu".
+	zulu := &models.Team{Name: "AAA-Zulu"}
+	yankee := &models.Team{Name: "aaa-yankee"}
+	empty := &models.Team{Name: "AAA-Empty"}
+	for _, team := range []*models.Team{zulu, yankee, empty} {
+		if err := s.CreateTeam(ctx, team); err != nil {
+			t.Fatalf("CreateTeam(%s): %v", team.Name, err)
+		}
+	}
+	if err := s.SetTeamManaged(ctx, zulu.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []struct {
+		team *models.Team
+		user *models.User
+		role models.TeamRole
+	}{
+		{zulu, ben, models.TeamRoleEditor},
+		{zulu, ann, models.TeamRoleAdmin},
+		{yankee, ben, models.TeamRoleMember},
+	} {
+		if err := s.AddTeamMember(ctx, m.team.ID, m.user.ID, m.role); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	all, err := s.ListAllTeamMemberships(ctx)
+	if err != nil {
+		t.Fatalf("ListAllTeamMemberships: %v", err)
+	}
+	type row struct {
+		team    models.TeamID
+		name    string
+		managed bool
+		user    models.UserID
+		role    models.TeamRole
+		account models.UserAccountType
+	}
+	ours := map[models.TeamID]bool{zulu.ID: true, yankee.ID: true, empty.ID: true}
+	var got []row
+	for _, m := range all {
+		if !ours[m.TeamID] {
+			continue
+		}
+		if m.CreatedAt.IsZero() {
+			t.Errorf("membership %+v has zero CreatedAt", m)
+		}
+		got = append(got, row{m.TeamID, m.TeamName, m.TeamManaged, m.UserID, m.Role, m.AccountType})
+	}
+	want := []row{
+		{yankee.ID, "aaa-yankee", false, ben.ID, models.TeamRoleMember, models.UserAccountTypeHuman},
+		{zulu.ID, "AAA-Zulu", true, ann.ID, models.TeamRoleAdmin, models.UserAccountTypeHuman},
+		{zulu.ID, "AAA-Zulu", true, ben.ID, models.TeamRoleEditor, models.UserAccountTypeHuman},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListAllTeamMemberships rows = %+v, want %+v", got, want)
 	}
 }
 
@@ -452,6 +520,25 @@ func testSavedQueriesCollections(t *testing.T, ctx context.Context, s store.Stor
 	}
 	if _, err := s.GetCollectionMember(ctx, pc.ID, stranger.ID); !errors.Is(err, models.ErrNotFound) {
 		t.Errorf("GetCollectionMember(non-member) err = %v, want ErrNotFound", err)
+	}
+}
+
+// testCollectionMemberRoles covers changing a direct member's role in place.
+func testCollectionMemberRoles(t *testing.T, ctx context.Context, s store.Store) {
+	owner := mkUser(t, ctx, s, "roles-owner@test.dev")
+	member := mkUser(t, ctx, s, "roles-member@test.dev")
+	shared, err := s.CreateCollection(ctx, "Shared", "", false, owner.ID)
+	if err != nil {
+		t.Fatalf("CreateCollection(shared): %v", err)
+	}
+	if err := s.AddCollectionMember(ctx, shared.ID, member.ID, models.CollectionRoleMember, &owner.ID); err != nil {
+		t.Fatalf("AddCollectionMember: %v", err)
+	}
+	if err := s.UpdateCollectionMemberRole(ctx, shared.ID, member.ID, models.CollectionRoleEditor); err != nil {
+		t.Fatalf("UpdateCollectionMemberRole: %v", err)
+	}
+	if got, err := s.GetCollectionMember(ctx, shared.ID, member.ID); err != nil || got.Role != models.CollectionRoleEditor {
+		t.Errorf("member after role update = %+v / %v, want editor", got, err)
 	}
 }
 
@@ -776,113 +863,6 @@ func verifyQueryHistoryPruning(t *testing.T, ctx context.Context, s store.Store,
 
 	if h, err := s.ListQueryHistory(ctx, userID, 5); err != nil || len(h) != 5 {
 		t.Errorf("ListQueryHistory(limit 5) = %d / %v, want 5", len(h), err)
-	}
-}
-
-// testQueryStats verifies the non-pruned daily rollup: IncrementQueryStats on
-// the same key twice sums into one row (count 2, durations added), and the
-// aggregate reads (top sources, top users, volume by day) return the expected
-// values over a small seeded set. A ghost source_id (no sources row) exercises
-// the LEFT JOIN -> "" source_name path.
-func testQueryStats(t *testing.T, ctx context.Context, s store.Store) {
-	userA := mkUser(t, ctx, s, "qs-a@test.dev")
-	userB := mkUser(t, ctx, s, "qs-b@test.dev")
-	srcA := mkSource(t, ctx, s, "qsa")
-	srcB := mkSource(t, ctx, s, "qsb")
-	const ghostSource = models.SourceID(999999) // no sources row -> LEFT JOIN yields ""
-
-	const (
-		day1 = "2026-07-10"
-		day2 = "2026-07-11"
-	)
-	team := models.TeamID(1)
-	inc := func(bucket string, u models.UserID, src models.SourceID, lang models.QueryLanguage, dur int64) {
-		t.Helper()
-		if err := s.IncrementQueryStats(ctx, bucket, u, team, src, lang, dur); err != nil {
-			t.Fatalf("IncrementQueryStats(%s,%d,%d): %v", bucket, u, src, err)
-		}
-	}
-
-	// Same (bucket_date,user,team,source,language) key twice -> one row, count 2,
-	// total_duration_ms summed (100+50=150, avg 75).
-	inc(day1, userA.ID, srcA.ID, models.QueryLanguageLogchefQL, 100)
-	inc(day1, userA.ID, srcA.ID, models.QueryLanguageLogchefQL, 50)
-	// Different day, same source/user -> srcA totals: count 3, dur 170 (avg 56).
-	inc(day2, userA.ID, srcA.ID, models.QueryLanguageLogchefQL, 20)
-	// srcB, userB.
-	inc(day1, userB.ID, srcB.ID, models.QueryLanguageClickHouseSQL, 30)
-	// Ghost source (no sources row) -> source_name "".
-	inc(day1, userB.ID, ghostSource, models.QueryLanguageClickHouseSQL, 10)
-
-	verifyTopSources(t, ctx, s, srcA, srcB, ghostSource)
-	verifyTopUsers(t, ctx, s, userA, userB)
-	verifyQueryVolumeByDay(t, ctx, s, day1, day2)
-}
-
-func verifyTopSources(t *testing.T, ctx context.Context, s store.Store, srcA, srcB *models.Source, ghost models.SourceID) {
-	t.Helper()
-	sources, err := s.TopSourcesByQueries(ctx, "2026-07-01", 10)
-	if err != nil {
-		t.Fatalf("TopSourcesByQueries: %v", err)
-	}
-	if len(sources) != 3 {
-		t.Fatalf("TopSourcesByQueries len = %d, want 3: %+v", len(sources), sources)
-	}
-	// Ordered by count desc: srcA (3) first.
-	if sources[0].SourceID != int64(srcA.ID) || sources[0].QueryCount != 3 || sources[0].AvgDurationMs != 56 {
-		t.Fatalf("top source = %+v, want srcA count 3 avg 56", sources[0])
-	}
-	if sources[0].SourceName != srcA.Name {
-		t.Errorf("top source name = %q, want %q", sources[0].SourceName, srcA.Name)
-	}
-	byID := make(map[int64]models.SourceQueryStat, len(sources))
-	for _, r := range sources {
-		byID[r.SourceID] = r
-	}
-	if g := byID[int64(srcB.ID)]; g.QueryCount != 1 || g.AvgDurationMs != 30 || g.SourceName != srcB.Name {
-		t.Errorf("srcB stat = %+v, want count 1 avg 30 name %q", g, srcB.Name)
-	}
-	if g := byID[int64(ghost)]; g.QueryCount != 1 || g.SourceName != "" {
-		t.Errorf("ghost source stat = %+v, want count 1 empty name", g)
-	}
-}
-
-func verifyTopUsers(t *testing.T, ctx context.Context, s store.Store, userA, userB *models.User) {
-	t.Helper()
-	users, err := s.TopUsersByQueries(ctx, "2026-07-01", 10)
-	if err != nil {
-		t.Fatalf("TopUsersByQueries: %v", err)
-	}
-	if len(users) != 2 {
-		t.Fatalf("TopUsersByQueries len = %d, want 2: %+v", len(users), users)
-	}
-	if users[0].UserID != userA.ID || users[0].QueryCount != 3 || users[0].UserEmail != userA.Email {
-		t.Fatalf("top user = %+v, want userA count 3 email %q", users[0], userA.Email)
-	}
-	if users[1].UserID != userB.ID || users[1].QueryCount != 2 || users[1].UserEmail != userB.Email {
-		t.Fatalf("second user = %+v, want userB count 2 email %q", users[1], userB.Email)
-	}
-}
-
-func verifyQueryVolumeByDay(t *testing.T, ctx context.Context, s store.Store, day1, day2 string) {
-	t.Helper()
-	volume, err := s.QueryVolumeByDay(ctx, "2026-07-01")
-	if err != nil {
-		t.Fatalf("QueryVolumeByDay: %v", err)
-	}
-	if len(volume) != 2 {
-		t.Fatalf("QueryVolumeByDay len = %d, want 2: %+v", len(volume), volume)
-	}
-	// Ascending by date: day1 (4 queries) then day2 (1 query).
-	if volume[0].Date != day1 || volume[0].QueryCount != 4 {
-		t.Fatalf("volume[0] = %+v, want %s count 4", volume[0], day1)
-	}
-	if volume[1].Date != day2 || volume[1].QueryCount != 1 {
-		t.Fatalf("volume[1] = %+v, want %s count 1", volume[1], day2)
-	}
-	// Window filtering: a `since` after the data yields nothing.
-	if empty, err := s.QueryVolumeByDay(ctx, "2026-08-01"); err != nil || len(empty) != 0 {
-		t.Errorf("QueryVolumeByDay(future since) = %d / %v, want 0", len(empty), err)
 	}
 }
 

@@ -7,40 +7,273 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-**Back up the metadata database and stop all old replicas before starting a
-new one.** Alerting v2 requires downtime. Review the migrations, rollback
-procedure, and changes to alert APIs, configuration, and token scopes in the
-[Upgrade notes](#upgrade-notes).
+## [2.8.3] - 2026-11-26
+
+Read-only agent onboarding tools (alert test/backtest, dashboards, silences,
+collections, destinations, and the `logchef-setup` skill), streamlined admin
+People and collection member management, ClickHouse default text index, and
+alert/ClickHouse query diagnostics fixes. No migrations: upgrade in place from
+v2.8.0, v2.8.1 or v2.8.2.
+
+### Added
+
+- Admin People view with a teams column, filters, user detail drawer, inline
+  team role editing, multi-select member picker, and `PUT /teams/:teamID/members/:userID`
+  for changing a team member's role.
+- Collection owners can invite members without global admin rights and change a
+  collection member's role, plus a streamlined Save Query dialog.
+- Default ClickHouse log table creation now uses ClickHouse's native text
+  index on the log body.
+
+- MCP tools `test_alert`, `backtest_alert`, `list_alert_silences`,
+  `list_collections` and `list_destinations`.
+- CLI commands `logchef alerts list`, `alerts test`, `alerts backtest`,
+  `silences list` and `destinations list`. `test` and `backtest` read the rule
+  as JSON from a file or stdin and save nothing.
+- `destinations:read` is an OAuth scope. An OAuth client, such as `logchef
+  auth` or MCP, lists each destination it may use without its recipients,
+  receiver URL or key. A client connected before this release must sign in
+  again to get it.
+- LogchefQL translation returns `warnings`. A dotted path on a String column
+  ordered against a quoted number (`msg.latency_ms > "500"`) gets one:
+  `JSONExtractString` returns a JSON number as text, so the comparison orders
+  text. `logchef explain` and the MCP `translate_logchefql` tool show it.
+- On a dotted path on a String column, an unquoted number compares as a number
+  in an ordering (`msg.latency_ms > 500` reads
+  `toFloat64OrNull(JSONExtractString(...))`) and as text with `=` and `!=`
+  (`msg.status = 400` matches the JSON number 400). Before, both were refused.
+- `logchef doctor` reports the read scopes that a `logchef auth` sign-in
+  lacks.
+- `logchef find --concurrency` sets how many sources are searched at once.
+- `dashboards:read` is an OAuth scope, with the MCP tools `list_dashboards`
+  and `get_dashboard` and the CLI command `logchef dashboards list`. An OAuth
+  caller sees the dashboards its user sees as a team member, with panels on
+  sources it cannot reach locked; an admin's OAuth token gets no admin
+  bypass. A client connected before this release must sign in again to get
+  the scope.
+- The `logchef-setup` skill proposes and creates one overview dashboard per
+  app, and a scheduled report can email it. A test checks the skill's
+  example dashboard against the schema 2 validator and its features header.
+- The `logchef-setup` skill, also bundled as `logchef skills get setup`,
+  walks a coding agent through setting up Logchef for an app from its
+  repository: it finds the production source, measures volume and noise,
+  proposes saved queries, a collection, views, alert rules backtested on real
+  data, silences and scheduled reports, and creates only what the user
+  confirms.
+- Alert backtests replay a past window: `end_time` in `POST /alerts/backtest`
+  and MCP `backtest_alert`, and `--end` or `--from`/`--to` in `logchef alerts
+  backtest`. The result carries `warnings` that say how much of the range the
+  120-evaluation budget reads, `summary.empty_result_episodes` for a grouped
+  rule's whole-result no-data episodes, and each group's `min_value`.
+- MCP `backtest_alert` returns only the evaluations where the status changed
+  unless `include_series` is set. MCP `get_alert_history` takes `limit`
+  (default 20, at most 100), `since` and `status`, and states the rule's query
+  once instead of in every episode.
+- The alert test warns about a ClickHouse query that reads the current time,
+  which a backtest refuses, and about a value column not named `value`.
+- `logchef explain` takes `-s`/`--since` or `--from`/`--to`, and `logchef sql`
+  takes `-l` for its row limit.
+
+### Changed
+
+- `POST /api/v1/alerts/test` and `/alerts/backtest` need `alerts:read`
+  instead of `alerts:write`: they save nothing and send nothing. A token with
+  `alerts:write` and no `alerts:read` can no longer call them.
+- A condition rule may leave out `condition_json`; the server takes the
+  filter in front of the aggregation pipe.
+- A 403 for a missing scope names the scope. For an OAuth caller it asks for
+  a new sign-in, and the `insufficient_scope` challenge carries `scope=`.
+  The CLI turns it into the command to run, or into a hint to use an API
+  token with the scope.
+- `logchef sql --dry-run` fills `{{__time_filter}}`, `{{__from}}`, `{{__to}}`,
+  `{{__timezone}}`, and with `--interval` `{{__interval}}` and
+  `{{__interval_s}}`, the way the server does on a ClickHouse source.
+- `logchef alerts backtest` prints the replayed range in the effective
+  timezone and names it, lists each firing or no-data episode's start and end
+  (up to 20), and rounds coverage as the server's warning does, so the two
+  agree.
+- `get_all_field_dimensions` and `GET .../fields/values` list a ClickHouse
+  field whose query timed out or failed with an `error` and empty values.
+  Before, the field was left out, as if it did not exist.
+- CLI messages that ask for an API token say where to create one: the user
+  menu > Profile > API tokens (`/settings/profile`).
+- A backtest that ends now ends at a multiple of the step since the Unix
+  epoch, so a rerun reads the same windows and catches the same bursts. One
+  with `end_time` evaluates at that instant.
+- The alert test lists the groups closest to firing first, lowest for `lt`
+  and `lte` and highest for `gt` and `gte`, and `value` is the first one's.
+- `get_all_field_dimensions` and the field sidebar leave out log-body columns
+  (`msg`, `message`, `body`, `log`, `_msg`, `raw` and similar) on ClickHouse:
+  their top values are whole log lines and cost a distinct count over every
+  body. A field asked for by name still returns its values.
+- MCP `get_alert_history` returns `{"alert": ..., "history": [...]}` instead of
+  a bare list.
+
+### Fixed
+
+- `logchef views list` and other commands under a sign-in made before the
+  server ran v2.8.0 failed with "API token does not have the required scope"
+  and no way forward. The error now names `saved_views:read` and the `logchef auth`
+  command to run.
+- `logchef find` without `-t` or `-S` could run for minutes with no output.
+  Each source now has a deadline, a slow or failing source is skipped and
+  named, and the matches from the others print.
+- `logchef sql -s` put the time filter on the outer query of
+  `SELECT ... FROM (SELECT ... FROM table) HAVING ...`, which failed with
+  `Missing columns: '_timestamp'`. The filter now goes into the subquery that
+  reads the table.
+- `logchef alerts test` and `alerts backtest` crashed on `"warnings": null`
+  from servers up to v2.8.2, in text and `--output json`. The CLI reads null
+  lists as empty and prints JSON without parsing it, and the server now sends
+  an empty list.
+- A NULL value in a ClickHouse SQL rule, such as `max()` over no row, failed
+  the evaluation, so a firing group kept firing. It is now no data and follows
+  the no-data policy.
+- A 403 for a scope no OAuth sign-in can hold, such as `reports:read`, told an
+  OAuth caller to sign in again. It now says to use an API token, and the CLI
+  prints that once.
+- A ClickHouse query that failed with an error such as an invalid `WITH FILL`
+  (code 475), an ambiguous identifier or a cyclic alias answered only "Failed
+  to query logs". These diagnostics now come back as a 400 with ClickHouse's
+  message, and any other ClickHouse error adds its code, such as "Failed to
+  query logs (ClickHouse error code 49)", without the message, which can name
+  a server.
+- `logchef alerts test` on an ungrouped rule got `"samples": null`; the server
+  now sends an empty list.
+
+
+## [2.8.2] - 2026-11-23
+
+Fixes for rough edges found while recording the v2.8.0 launch videos. No
+migrations: upgrade in place from v2.8.0 or v2.8.1.
+
+### Fixed
+
+- Choosing a value in the Explorer field sidebar, a filter from a table cell
+  or expanded row, a group of an aggregation result, or "Add as column" for
+  a nested field now runs the query. Before, these edited the query text and
+  left the old results on screen until Run was pressed.
+- Choosing "No view" in the Explorer returns the table to the source's
+  default columns, widths and newest-first sort. If the query is still the
+  view's filter, the filter and the view's time range are cleared too. Before,
+  the view's columns, filter and range stayed.
+- An alert rule's Groups card shows a loading state until its groups arrive.
+  Before, it said "No group is firing." while loading. When the groups or the
+  history fail to load, each card now shows the error with a Retry instead of
+  reading as empty.
+- The sign-in page says "Your session ended. Sign in again." when a browser's
+  session has ended, for example because the same user signed in elsewhere
+  with the default `auth.max_concurrent_sessions` of 1. This works across tabs
+  and browser restarts. On single-sign-on-only instances, the page now waits
+  for a click instead of sending the user straight back to the identity
+  provider.
+- A dashboard says "not found" only when the server answers 404. Other
+  failures show "Failed to load" with a Retry, and a load that a newer one
+  replaced no longer overwrites what the page shows. Before, a failed or
+  abandoned read could show "Dashboard not found or you don't have access."
+  for a dashboard that exists.
+- Field values on a ClickHouse source answer 400 instead of 500 for a filter
+  with an aggregation pipe and no `query_language`, and for a filter that
+  names a column the table does not have.
+
+## [2.8.1] - 2026-11-22
+
+Fixes found while recording the v2.8.0 launch videos. No migrations: upgrade
+in place from v2.8.0.
+
+### Fixed
+
+- Email delivery works with a display-name SMTP From address such as
+  `Logchef <logchef@example.com>`. Before, the whole value went into
+  `MAIL FROM`, so strict servers refused every alert, report and test email.
+  The From setting now refuses a value that is not an email address.
+- The field sidebar shows values after a LogchefQL aggregation such as
+  `level=error | count() by service`, counted over the filter in front of
+  the pipe. Before, every field failed to load with HTTP 500 on ClickHouse
+  and VictoriaLogs sources. A malformed field-value filter is now a 400.
+- An expanded Explorer table row keeps its Fields/JSON switch and Show
+  Context within the visible width, down to phone width. Before, a long
+  column pushed them off screen to the right of the table. The table header
+  also stays pinned while the rows scroll.
+- Dashboard table panels show time columns in one format and in the
+  viewer's zone on every backend. Before, a VictoriaLogs table printed raw
+  UTC ISO times and a Loki table printed local times with nanosecond digits.
+
+## [2.8.0] - 2026-11-22
+
+Logchef reads Grafana Loki as a third backend, LogchefQL counts and groups,
+and alerts fire per group. Queries are now on the record: the audit log
+stores each query run with its full text, and Query Activity shows who uses
+Logchef, which sources are slow and which query patterns cost the most.
+Scheduled reports, saved Explorer views, shared dashboard editing and a
+ClickHouse schema advisor complete the release.
+
+**Back up the metadata database, then stop every old replica before the
+first new one starts.** Alerting v2 does not support a rolling upgrade, so
+plan for downtime. Startup runs 18 migrations on each store (SQLite 000042
+to 000059, Postgres 000016 to 000033). Treat them as forward-only: the alert
+migrations move each rule's targets into destinations and cannot be undone,
+so rolling back means restoring the backup. Alert API fields, configuration
+keys and token scopes also change. Read the [Upgrade notes](#upgrade-notes)
+before you upgrade.
 
 ### Highlights
 
-- **Grafana Loki.** Search and tail Loki logs with LogchefQL or native LogQL,
-  inspect stream labels and surrounding logs, and use Loki in dashboards and
-  alerts. Grant Loki source access only to teams trusted with the whole tenant.
-- **LogchefQL aggregations.** Count, group, and summarize ClickHouse and
-  VictoriaLogs logs. See the results in a table or, where supported, a chart.
-  Use **Add to dashboard** to start a panel from the query.
-- **Alerting v2.** Alert on each group independently, choose what happens
-  when data is missing, mute notifications with silences, and backtest rules
-  before saving. Reuse email, webhook, Slack, and PagerDuty destinations.
-  The delivery queue tracks attempts and retries eligible failures.
-- **Scheduled reports.** Email a dashboard, dashboard tab, or saved query on
-  a schedule. Logchef checks the owner's access at each run and locks panels
-  each Logchef recipient cannot see. External recipients require admin opt-in.
-- **Saved Explorer views.** Save columns, sort order, display mode, and
-  optional query defaults. Set personal, team, or source defaults and share
-  links that carry your layout.
-- **Shared dashboard editing.** Team owners, admins, and editors can edit
-  shared dashboards when they have edit rights on every team the panels use.
-  The dashboard creator and global admins retain delete access.
-- **Audit log.** Global admins can inspect configuration changes, sign-ins,
-  and log exports in the UI, API, or CLI. Audit records redact credentials.
-- **ClickHouse schema advisor.** Review recommendations for indexes,
-  columns, codecs, table keys, and retention. Logchef shows the evidence and
-  any suggested DDL for review without applying it.
-- **Source access and secrets.** Team admins need access to a source before
-  linking it to their team. Provisioning exports reference custom header
-  secrets by environment variable.
+- **Grafana Loki.** Point Logchef at a Loki tenant and search it with
+  LogchefQL, which compiles to LogQL, or with native LogQL. The histogram,
+  field sidebar, live tail, log context, saved queries, dashboards, alerts,
+  AI query generation, the CLI and the MCP server all work on Loki. A Loki
+  source gives its teams the whole tenant, so link it only to teams you trust
+  with all of it.
+- **LogchefQL aggregations.** `level=error | count() by service` counts,
+  sums, averages and takes percentiles of matching logs, with up to 5 `by`
+  keys, one of which can be a time bucket. The same text runs on ClickHouse and
+  VictoriaLogs. Explorer shows the result as a table or a chart, and **Add to
+  dashboard** turns it into a panel. The CLI, MCP and Ask Chef run
+  aggregations too.
+- **Alerting v2.** One rule watches every service: with **Group by**
+  `service`, each group fires, notifies and resolves on its own. Rules decide
+  what an empty result means, silences mute maintenance windows without
+  stopping evaluation, and **Run backtest** replays an unsaved rule over up
+  to the last 7 days before you save it. Notifications go to reusable email,
+  webhook, Slack and PagerDuty destinations through a delivery queue that
+  retries failures and records every attempt.
+- **Audit log.** Logchef records configuration changes, sign-ins, OAuth
+  consent, exports and query runs. Each `query.run` event holds the full
+  query text, the time range, the rows returned and scanned, the duration and
+  the outcome, whether the query came from the Explorer, a dashboard, the
+  CLI, the API, an MCP client, Ask Chef, a live tail or a log context read.
+  Global admins browse it in the UI, read it through the API, list it with
+  `logchef audit list`, or ship it off the host as JSON log lines.
+- **Query Activity, rebuilt.** **Administration → Query Activity** shows
+  adoption, the busiest and slowest sources, and the repeated query patterns
+  that cost the most. Each number compares with the window before it, with
+  latency percentiles, scan cost and failure rates. Click a source or a user
+  to scope the whole page to it.
+- **Scheduled reports.** Email a dashboard, one dashboard tab or a saved
+  query every hour, day, week or month. Each run checks the owner's access,
+  and each Logchef recipient's copy locks the panels that recipient cannot
+  see. External addresses need a global admin to allow them.
+- **Saved Explorer views.** Save a source's columns, sort, display mode and
+  optional query defaults as a personal, team or source view, set a default
+  per scope, and share links that carry your layout.
+- **Shared dashboard editing.** Team owners, admins and editors can edit a
+  shared dashboard when they have edit rights on every team its query panels
+  use. Only the creator and global admins can delete it.
+- **ClickHouse schema advisor.** A global admin presses **Run analysis** on
+  Source Inspection. The advisor joins the filter shapes of real Explorer
+  queries with the table's metadata and suggests bloom filter and text
+  indexes, materialized columns, `LowCardinality`, codecs, and reviews of
+  sorting keys, partition keys and retention. Each finding shows its evidence
+  and any suggested DDL. Logchef never runs the DDL.
+- **MCP and CLI.** MCP clients query Loki, run aggregations, list saved views
+  and see alert groups, silences and deliveries. CLI 0.5.0 adds
+  `logchef advisor`, `logchef audit list`, `logchef reports`, `logchef views
+  list`, `logchef open --view`, LogQL through `logchef sql`, and aggregation
+  tables.
+- **Source access and secrets.** A team admin can link only sources they
+  can access. Provisioning exports reference custom header values by
+  environment variable instead of writing them out.
 
 ### Added
 
@@ -131,8 +364,9 @@ procedure, and changes to alert APIs, configuration, and token scopes in the
   group still changes state and writes history, and sends nothing: a
   notification queued before the silence, or its retry, waits until the
   silence ends. The notification it owes goes out when the silence ends, and
-  a group that fired and resolved inside a silence sends nothing. Anyone who sees the source and holds `alerts:write`
-  can create one; the creator and global admins edit and delete it. The
+  a group that fired and resolved inside a silence sends nothing. Anyone who
+  sees the source and holds `alerts:write` can create one; the creator and
+  global admins edit and delete it. The
   **Silences** tab lists them, and **Silence** on a group of a rule starts one
   for an hour. Routes: `/api/v1/alert-silences`.
 - Backtest. **Run backtest** in the alert form replays an unsaved rule over
@@ -171,7 +405,6 @@ procedure, and changes to alert APIs, configuration, and token scopes in the
   `logchef_notification_deliveries_pending`) and
   backtests (`logchef_alert_backtests_total`). The Alerting docs page is
   rewritten for all of the above.
-
 - Saved Explorer views. A view holds a source's visible columns with their
   order and widths, the sort, the display mode, and optionally a LogchefQL
   filter and a relative time range that fill an empty editor and an unset
@@ -187,9 +420,18 @@ procedure, and changes to alert APIs, configuration, and token scopes in the
   The new Saved Views docs page covers it.
 - Audit log. Logchef records configuration changes, sign-ins (including
   failed ones), OAuth consent and grant revocations, and log exports as audit
-  events, each with the actor, how they authenticated, the target and the
-  fields that changed. Credentials are recorded only as "changed", and query
-  text only as a digest. Provisioning runs, startup admins, OIDC
+  events, plus query runs, each with the actor, how they authenticated, the
+  target and the fields that changed. Credentials are recorded only as
+  "changed", and stored query text (saved queries, alerts, shares, views) only
+  as a digest. Every data query on `/logs/query`, `/logs/windowed` and
+  `/logchefql/query` records one `query.run` event with the full query text,
+  the requested time range and limit, the rows returned and scanned, and the
+  duration, success or failure; it is written in the background, so queries
+  do not wait for it. An export records its full query and time range on
+  `log_export.create`, its rows and bytes on the new `log_export.complete`,
+  and each download on `log_export.download`. The Audit Log page names sources
+  and teams, and shows query text and result stats on query and export
+  events. Provisioning runs, startup admins, OIDC
   auto-provisioning and the report scheduler record their changes too. Global
   admins browse and download events in Administration → Audit Log, and read
   them through `GET /api/v1/admin/audit-events` and its NDJSON `/export` with
@@ -201,6 +443,15 @@ procedure, and changes to alert APIs, configuration, and token scopes in the
   stored, the request answers 503 and no token or data leaves the server. The
   new Audit Log docs page covers the event format, every action, retention and
   the metrics.
+- `query.run` audit events for reads outside the query endpoints. Each MCP or
+  Ask Chef tool call that reads logs records one event with `detail.mode`
+  `mcp` or `ask_chef` and `detail.tool`, as the user it ran for: an MCP call
+  carries the OAuth grant and client, and an Ask Chef call carries the session
+  or API token of the turn request. A live tail records one event with mode
+  `tail` when the session ends, with its filter, the rows it sent and how long
+  it ran. A log context request records one with mode `context`, its anchor
+  and the rows returned. A failed read records a failure with the same reason
+  codes as other queries. None of these write query history.
 - ClickHouse schema advisor. Logchef records the filter shape of each
   Explorer query on a ClickHouse source (columns, Map keys, JSON paths and
   match kinds, never values) and joins it with the table's metadata. A global
@@ -220,7 +471,6 @@ procedure, and changes to alert APIs, configuration, and token scopes in the
   and printed by `logchef advisor <source>` with `--refresh`, `--ddl` and
   `--output json`. The new Schema Advisor docs page covers the rules,
   thresholds, budgets and metrics.
-
 - Scheduled reports. A report emails a dashboard, one dashboard tab or a saved
   query on an hourly, daily, weekly or monthly schedule in its own timezone,
   to its owner, chosen users and teams, and, when a global admin allows them,
@@ -232,8 +482,8 @@ procedure, and changes to alert APIs, configuration, and token scopes in the
   cannot see in the UI; an external address gets the owner's view. Two
   settings, off by default and changed only by a global admin from a browser
   session, gate external addresses: `reports.external_recipients` and
-  `reports.allowed_email_domains` (`*` for every domain). Reports pause when the owner is deactivated
-  or after three failed runs, and a report with no owner can be claimed. The
+  `reports.allowed_email_domains` (`*` for every domain). Reports pause when
+  the owner is deactivated or after three failed runs, and a report with no owner can be claimed. The
   Reports page lists your reports with their next and last run, the reports
   sent to you, and every report for global admins; it has an editor with a
   preview and a test send, and a run history. **Schedule report** opens the
@@ -257,11 +507,23 @@ procedure, and changes to alert APIs, configuration, and token scopes in the
   New and edited rules need a frequency of at least 10 seconds.
 - A grouped rule sends one notification per group to every destination type,
   including email, Slack and webhook version 2.
+- **Administration → Query Activity** answers who uses Logchef, which
+  sources are hot or slow, and which repeated query patterns cost the most.
+  It counts human users by default, with a switch to service accounts or
+  all, and names service accounts by their full name. Clicking a source or
+  a user scopes the whole page. Every number compares with the window of
+  the same length before it, with latency percentiles, scan cost and
+  failure rates. Sources show open schema advisor findings, and filter
+  shapes link to the advisor finding on one of their columns.
+  `GET /api/v1/admin/query-stats` takes `account`, `source_id` and
+  `user_id` and returns the new payload; its old fields are gone.
 - MCP `list_alerts`, `get_alert_history` and the `investigate_alert` prompt
   describe groups, no-data episodes, silences and deliveries.
 
 ### Removed
 
+- `GET /api/v1/admin/query-activity` and the recent query sample and slowest
+  recent queries on Query Activity.
 - `alerts.evaluation_interval`. Each rule runs at its own frequency.
 - `recipient_user_ids` and `webhook_urls` in alert requests and responses.
   Use `destination_ids`.
@@ -271,7 +533,23 @@ procedure, and changes to alert APIs, configuration, and token scopes in the
 
 ### Fixed
 
-- Live tail releases its slot when the client disconnects on any backend.
+- Live tail releases its slot as soon as the client disconnects, on every
+  backend. Before, a closed tail held its slot until its 15-second heartbeat
+  failed to write.
+- A dashboard of 4 or more panels with a cache TTL of 0, or with the server
+  cache off, no longer rejects one of its own panels with "Too many active
+  preview queries". Panels now always run as dashboard queries.
+- Dashboard charts: series named `1xx` to `5xx` take gray, green, blue, amber
+  and red by meaning; unstacked area charts leave gaps for missing points
+  instead of dropping to zero; a one-series bar chart puts its value labels
+  above the bars; value-axis labels add decimals until they differ, so
+  1500 ms and 2000 ms no longer both read "2 s"; and a negative value with a
+  prefix reads -₹0.69 Cr instead of ₹-0.69 Cr.
+- The time range button names calendar ranges, so a dashboard that opens on
+  `today-6d` shows "Last 7 calendar days" instead of two timestamps.
+- MCP `translate_logchefql` and `query_logchefql` default an empty timezone
+  to UTC, as documented. Before, `translate_logchefql` on ClickHouse returned
+  no `full_sql` without a timezone.
 - If a saved view changed since you loaded it, the picker can reload the
   latest version or save your edits as a new view.
 - Provisioning export keeps the variable a header was declared with in
@@ -291,6 +569,19 @@ procedure, and changes to alert APIs, configuration, and token scopes in the
   with a `WHERE` but no time condition. It now warns only on ClickHouse SQL
   that uses no time macro and names no timestamp column in `WHERE` or
   `PREWHERE`.
+- A read-only demo (`[demo] read_only = true`) allows the alert **Test
+  query** and **Run backtest**, Ask Chef and windowed search, which read logs
+  and write nothing. Before, each failed with "This public demo is
+  read-only". The report editor opens read-only there, since Save, Preview
+  and Send test each write or send.
+- A saved view's column list applies to log rows only. Before, a view that
+  named a group key, such as `app`, hid every other column of an aggregation
+  or metric result: a LogQL `sum by (app) (count_over_time(...))` showed only
+  `app`, without `time` and `value`. ClickHouse `GROUP BY`, LogsQL `stats`
+  and LogchefQL aggregation results now show all their columns.
+- A native alert rule with **Group by** set asks for one row per group with
+  the Group by columns and a numeric value, instead of a single numeric
+  value.
 
 ### Security
 
@@ -298,7 +589,6 @@ procedure, and changes to alert APIs, configuration, and token scopes in the
   who was not a global admin could link any source in the instance to their
   team and then query its logs. Such a link is now refused as source not
   found. Global admins and provisioning are unaffected.
-
 - Provisioning export no longer writes custom header values of VictoriaLogs
   and Loki sources. A header often carries a credential, such as an API key
   for a fronting proxy, and the export ends up in files people commit or
@@ -338,11 +628,15 @@ procedure, and changes to alert APIs, configuration, and token scopes in the
   the Read-only preset before this release lacks `reports:read`; reissue it to
   read reports. OAuth sign-ins, including `logchef auth`, cannot reach
   reports: use an API token.
-
 - A new `[audit]` config section bounds the `audit_events` table (SQLite
   000045, Postgres 000019):
-  `retention_days` (default 365) and `max_rows` (default 1,000,000), pruned
-  every five minutes, 5,000 rows at a time. `log_events` (default `true`)
+  `retention_days` (default 30) and `max_rows` (default 1,000,000), pruned
+  every five minutes, 5,000 rows at a time. Every query adds a `query.run`
+  event that counts toward `max_rows`, so size it for your query volume, or
+  ship the `audit` log line for longer retention. A build of this release line
+  from before query events kept 365 days by default: its events older than 30
+  days are pruned on the first start unless `audit.retention_days` is set.
+  `log_events` (default `true`)
   writes each event as an `audit` log line; set it to `false` to turn the line
   off. The new token scope `audit:read` is in no preset and is not an OAuth
   scope: reading the audit log needs a global admin's session or API token.
@@ -358,6 +652,15 @@ procedure, and changes to alert APIs, configuration, and token scopes in the
   000049, 000051 and 000053, Postgres 000023, 000025 and 000027). Each creates
   a new table and rebuilds none. Shape rows older than 90 days are pruned once
   a day.
+- Query Activity's latency, scan and failure numbers add columns to
+  `query_stats_daily` and `query_shape_stats_daily` and a new
+  `query_failure_stats_daily` table (SQLite migration 000059, Postgres
+  000033). Nothing is rebuilt. Days before the upgrade count queries only, so
+  latency percentiles, scan cost and failure rates start on the upgrade day,
+  and the page says so.
+- Scripts that read `GET /api/v1/admin/query-stats` must move to its new
+  payload: the old fields are gone. `GET /api/v1/admin/query-activity` is
+  removed.
 - **Alerting v2: back up the metadata database, then stop every old replica
   before the first new one starts.** A rolling upgrade is not supported. The
   migrations rebuild the SQLite `alerts` and `alert_history` tables and drop
@@ -2426,7 +2729,11 @@ Initial public release.
 - Embedded web UI
 - Prometheus metrics endpoint
 
-[Unreleased]: https://github.com/mr-karan/logchef/compare/v2.7.0...HEAD
+[Unreleased]: https://github.com/mr-karan/logchef/compare/v2.8.3...HEAD
+[2.8.3]: https://github.com/mr-karan/logchef/compare/v2.8.2...v2.8.3
+[2.8.2]: https://github.com/mr-karan/logchef/compare/v2.8.1...v2.8.2
+[2.8.1]: https://github.com/mr-karan/logchef/compare/v2.8.0...v2.8.1
+[2.8.0]: https://github.com/mr-karan/logchef/compare/v2.7.0...v2.8.0
 [2.7.0]: https://github.com/mr-karan/logchef/compare/v2.6.1...v2.7.0
 [2.6.1]: https://github.com/mr-karan/logchef/compare/v2.6.0...v2.6.1
 [2.6.0]: https://github.com/mr-karan/logchef/compare/v2.5.0...v2.6.0
